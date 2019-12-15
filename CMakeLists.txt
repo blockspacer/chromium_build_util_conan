@@ -27,18 +27,18 @@ else()
   message (FATAL_ERROR "must use conan")
 endif()
 
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/)
+
 find_package(cmake_platform_detection REQUIRED)
 run_cmake_platform_detection()
-
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/)
+# NOTE: perform platform checks before everything else
+include(cmake/PlatformChecks)
 
 set(build_util_DIR "${CMAKE_CURRENT_SOURCE_DIR}/chromium/build/")
 
 if (NOT EXISTS "${build_util_DIR}build_config.h")
   message(FATAL_ERROR "Could not find ${build_util_DIR}build_config.h")
 endif()
-
-include(cmake/PlatformChecks)
 
 include(cmake/CommonOptions)
 
