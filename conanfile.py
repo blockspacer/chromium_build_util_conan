@@ -134,8 +134,18 @@ class chromium_build_util_conan_project(ConanFile):
     # from the CMake install automatically.
     # For instance, you need to specify the lib directories, etc.
     def package_info(self):
-        self.cpp_info.libs = ["chromium_build_util"]
+        #self.cpp_info.libs = ["chromium_build_util"]
 
+        self.cpp_info.includedirs = ["include"]
+        self.cpp_info.libs = tools.collect_libs(self)
+        self.cpp_info.libdirs = ["lib"]
+        self.cpp_info.bindirs = ["bin"]
+        self.env_info.LD_LIBRARY_PATH.append(
+            os.path.join(self.package_folder, "lib"))
+        self.env_info.PATH.append(os.path.join(self.package_folder, "bin"))
+        for libpath in self.deps_cpp_info.lib_paths:
+            self.env_info.LD_LIBRARY_PATH.append(libpath)
+            
         #self.cpp_info.includedirs.append(os.getcwd())
         #self.cpp_info.includedirs.append(
         #  os.path.join("base", "third_party", "build_util"))
