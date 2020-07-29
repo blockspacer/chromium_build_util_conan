@@ -70,13 +70,14 @@ class chromium_build_util_conan_project(ConanFile):
     #  url = "https://github.com/....."
     #  self.run("git clone %s ......." % url)
 
+    def build_requirements(self):
+        if self.options.enable_tests:
+            self.build_requires("catch2/[>=2.1.0]@bincrafters/stable")
+            self.build_requires("conan_gtest/release-1.10.0@conan/stable")
+            self.build_requires("FakeIt/[>=2.0.4]@gasuketsu/stable")
+
     def requirements(self):
         self.requires("cmake_platform_detection/master@conan/stable")
-
-        if self.options.enable_tests:
-            self.requires("catch2/[>=2.1.0]@bincrafters/stable")
-            self.requires("gtest/[>=1.8.0]@bincrafters/stable")
-            self.requires("FakeIt/[>=2.0.4]@gasuketsu/stable")
 
     def _configure_cmake(self):
         cmake = CMake(self)
