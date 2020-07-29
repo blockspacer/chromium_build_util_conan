@@ -33,12 +33,10 @@ class chromium_build_util_conan_project(ConanFile):
     topics = ('c++')
 
     options = {
-        "enable_tests": [True, False],
         "enable_sanitizers": [True, False]
     }
 
     default_options = (
-        "enable_tests=False",
         "enable_sanitizers=False"
         # build
         #"*:shared=False"
@@ -70,12 +68,6 @@ class chromium_build_util_conan_project(ConanFile):
     #  url = "https://github.com/....."
     #  self.run("git clone %s ......." % url)
 
-    def build_requirements(self):
-        if self.options.enable_tests:
-            self.build_requires("catch2/[>=2.1.0]@bincrafters/stable")
-            self.build_requires("conan_gtest/release-1.10.0@conan/stable")
-            self.build_requires("FakeIt/[>=2.0.4]@gasuketsu/stable")
-
     def requirements(self):
         self.requires("cmake_platform_detection/master@conan/stable")
 
@@ -90,8 +82,6 @@ class chromium_build_util_conan_project(ConanFile):
             cmake.definitions[var_name] = var_value
 
         add_cmake_option("ENABLE_SANITIZERS", self.options.enable_sanitizers)
-
-        add_cmake_option("ENABLE_TESTS", self.options.enable_tests)
 
         cmake.configure(build_folder=self._build_subfolder)
 
