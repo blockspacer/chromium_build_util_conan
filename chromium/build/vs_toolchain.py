@@ -5,6 +5,7 @@
 
 from __future__ import print_function
 
+import collections
 import glob
 import json
 import os
@@ -18,14 +19,40 @@ import sys
 
 from gn_helpers import ToGNString
 
+# VS 2019 16.61 with 10.0.19041 SDK, and 10.0.17134 version of
+# d3dcompiler_47.dll, with ARM64 libraries and UWP support.
+# See go/chromium-msvc-toolchain for instructions about how to update the
+# toolchain.
+#
+# When updating the toolchain, consider the following areas impacted by the
+# toolchain version:
+#
+# * //base/win/windows_version.cc NTDDI preprocessor check
+#   Triggers a compiler error if the available SDK is older than the minimum.
+# * //build/config/win/BUILD.gn NTDDI_VERSION value
+#   Affects the availability of APIs in the toolchain headers.
+# * //docs/windows_build_instructions.md mentions of VS or Windows SDK.
+#   Keeps the document consistent with the toolchain version.
+TOOLCHAIN_HASH = '20d5f2553f'
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 json_data_file = os.path.join(script_dir, 'win_toolchain.json')
 
+# VS versions are listed in descending order of priority (highest first).
+MSVS_VERSIONS = collections.OrderedDict([
+  ('2019', '16.0'),
+  ('2017', '15.0'),
+])
 
-# Use MSVS2017 as the default toolchain.
-CURRENT_DEFAULT_TOOLCHAIN_VERSION = '2017'
+# List of preferred VC toolset version based on MSVS
+MSVC_TOOLSET_VERSION = {
+   '2019' : 'VC142',
+   '2017' : 'VC141',
+}
 
+def _HostIsWindows():
+  """Returns True if running on a Windows host (including under cygwin)."""
+  return sys.platform in ('win32', 'cygwin')
 
 def SetEnvironmentAndGetRuntimeDllDirs():
   """Sets up os.environ to use the depot_tools VS toolchain with gyp, and
@@ -41,7 +68,7 @@ def SetEnvironmentAndGetRuntimeDllDirs():
       bool(int(os.environ.get('DEPOT_TOOLS_WIN_TOOLCHAIN', '1')))
   # When running on a non-Windows host, only do this if the SDK has explicitly
   # been downloaded before (in which case json_data_file will exist).
-  if ((sys.platform in ('win32', 'cygwin') or os.path.exists(json_data_file))
+  if ((_HostIsWindows() or os.path.exists(json_data_file))
       and depot_tools_win_toolchain):
     if ShouldUpdateToolchain():
       if len(sys.argv) > 1 and sys.argv[1] == 'update':
@@ -56,8 +83,6 @@ def SetEnvironmentAndGetRuntimeDllDirs():
     toolchain = toolchain_data['path']
     version = toolchain_data['version']
     win_sdk = toolchain_data.get('win_sdk')
-    if not win_sdk:
-      win_sdk = toolchain_data['win8sdk']
     wdk = toolchain_data['wdk']
     # TODO(scottmg): The order unfortunately matters in these. They should be
     # split into separate keys for x64/x86/arm64. (See CopyDlls call below).
@@ -70,7 +95,6 @@ def SetEnvironmentAndGetRuntimeDllDirs():
       vs_runtime_dll_dirs.append('Arm64Unused')
 
     os.environ['GYP_MSVS_OVERRIDE_PATH'] = toolchain
-    os.environ['GYP_MSVS_VERSION'] = version
 
     os.environ['WINDOWSSDKDIR'] = win_sdk
     os.environ['WDK_DIR'] = wdk
@@ -80,8 +104,6 @@ def SetEnvironmentAndGetRuntimeDllDirs():
   elif sys.platform == 'win32' and not depot_tools_win_toolchain:
     if not 'GYP_MSVS_OVERRIDE_PATH' in os.environ:
       os.environ['GYP_MSVS_OVERRIDE_PATH'] = DetectVisualStudioPath()
-    if not 'GYP_MSVS_VERSION' in os.environ:
-      os.environ['GYP_MSVS_VERSION'] = GetVisualStudioVersion()
 
     # When using an installed toolchain these files aren't needed in the output
     # directory in order to run binaries locally, but they are needed in order
@@ -129,26 +151,50 @@ def _RegistryGetValue(key, value):
 
 
 def GetVisualStudioVersion():
-  """Return GYP_MSVS_VERSION of Visual Studio.
+  """Return best available version of Visual Studio.
   """
-  return os.environ.get('GYP_MSVS_VERSION', CURRENT_DEFAULT_TOOLCHAIN_VERSION)
+  supported_versions = list(MSVS_VERSIONS.keys())
+
+  # VS installed in depot_tools for Googlers
+  if bool(int(os.environ.get('DEPOT_TOOLS_WIN_TOOLCHAIN', '1'))):
+    return supported_versions[0]
+
+  # VS installed in system for external developers
+  supported_versions_str = ', '.join('{} ({})'.format(v,k)
+      for k,v in MSVS_VERSIONS.items())
+  available_versions = []
+  for version in supported_versions:
+    # Checking vs%s_install environment variables.
+    # For example, vs2019_install could have the value
+    # "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community".
+    # Only vs2017_install and vs2019_install are supported.
+    path = os.environ.get('vs%s_install' % version)
+    if path and os.path.exists(path):
+      available_versions.append(version)
+      break
+    # Detecting VS under possible paths.
+    path = os.path.expandvars('%ProgramFiles(x86)%' +
+                              '/Microsoft Visual Studio/%s' % version)
+    if path and any(
+        os.path.exists(os.path.join(path, edition))
+        for edition in ('Enterprise', 'Professional', 'Community', 'Preview',
+                        'BuildTools')):
+      available_versions.append(version)
+      break
+
+  if not available_versions:
+    raise Exception('No supported Visual Studio can be found.'
+                    ' Supported versions are: %s.' % supported_versions_str)
+  return available_versions[0]
 
 
 def DetectVisualStudioPath():
-  """Return path to the GYP_MSVS_VERSION of Visual Studio.
+  """Return path to the installed Visual Studio.
   """
 
   # Note that this code is used from
   # build/toolchain/win/setup_toolchain.py as well.
   version_as_year = GetVisualStudioVersion()
-  year_to_version = {
-      '2017': '15.0',
-      '2019': '16.0',
-  }
-  if version_as_year not in year_to_version:
-    raise Exception(('Visual Studio version %s (from GYP_MSVS_VERSION)'
-                     ' not supported. Supported versions are: %s') % (
-                       version_as_year, ', '.join(year_to_version.keys())))
 
   # The VC++ >=2017 install location needs to be located using COM instead of
   # the registry. For details see:
@@ -167,12 +213,14 @@ def DetectVisualStudioPath():
                          version_as_year),
       os.path.expandvars('%ProgramFiles(x86)%' +
                          '/Microsoft Visual Studio/%s/Preview' %
+                         version_as_year),
+      os.path.expandvars('%ProgramFiles(x86)%' +
+                         '/Microsoft Visual Studio/%s/BuildTools' %
                          version_as_year)):
     if path and os.path.exists(path):
       return path
 
-  raise Exception(('Visual Studio Version %s (from GYP_MSVS_VERSION)'
-                   ' not found.') % (version_as_year))
+  raise Exception('Visual Studio Version %s not found.' % version_as_year)
 
 
 def _CopyRuntimeImpl(target, source, verbose=True):
@@ -196,22 +244,48 @@ def _CopyRuntimeImpl(target, source, verbose=True):
     # keep it readable.
     os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
 
+def _SortByHighestVersionNumberFirst(list_of_str_versions):
+  """This sorts |list_of_str_versions| according to version number rules
+  so that version "1.12" is higher than version "1.9". Does not work
+  with non-numeric versions like 1.4.a8 which will be higher than
+  1.4.a12. It does handle the versions being embedded in file paths.
+  """
+  def to_int_if_int(x):
+    try:
+      return int(x)
+    except ValueError:
+      return x
 
-def _CopyUCRTRuntime(target_dir, source_dir, target_cpu, dll_pattern, suffix):
+  def to_number_sequence(x):
+    part_sequence = re.split(r'[\\/\.]', x)
+    return [to_int_if_int(x) for x in part_sequence]
+
+  list_of_str_versions.sort(key=to_number_sequence, reverse=True)
+
+
+def _CopyUCRTRuntime(target_dir, source_dir, target_cpu, suffix):
   """Copy both the msvcp and vccorlib runtime DLLs, only if the target doesn't
   exist, but the target directory does exist."""
   if target_cpu == 'arm64':
     # Windows ARM64 VCRuntime is located at {toolchain_root}/VC/Redist/MSVC/
-    # {x.y.z}/[debug_nonredist/]arm64/Microsoft.VC141.CRT/.
+    # {x.y.z}/[debug_nonredist/]arm64/Microsoft.VC14x.CRT/.
+    # Select VC toolset directory based on Visual Studio version
     vc_redist_root = FindVCRedistRoot()
     if suffix.startswith('.'):
+      vc_toolset_dir = 'Microsoft.{}.CRT' \
+         .format(MSVC_TOOLSET_VERSION[GetVisualStudioVersion()])
       source_dir = os.path.join(vc_redist_root,
-                                'arm64', 'Microsoft.VC141.CRT')
+                                'arm64', vc_toolset_dir)
     else:
+      vc_toolset_dir = 'Microsoft.{}.DebugCRT' \
+         .format(MSVC_TOOLSET_VERSION[GetVisualStudioVersion()])
       source_dir = os.path.join(vc_redist_root, 'debug_nonredist',
-                                'arm64', 'Microsoft.VC141.DebugCRT')
-  for file_part in ('msvcp', 'vccorlib', 'vcruntime'):
-    dll = dll_pattern % file_part
+                                'arm64', vc_toolset_dir)
+  file_parts = ('msvcp140', 'vccorlib140', 'vcruntime140')
+  if target_cpu == 'x64' and GetVisualStudioVersion() != '2017':
+    file_parts = file_parts + ('vcruntime140_1', )
+  for file_part in file_parts:
+    dll = file_part + suffix
     target = os.path.join(target_dir, dll)
     source = os.path.join(source_dir, dll)
     _CopyRuntimeImpl(target, source)
@@ -232,7 +306,7 @@ def _CopyUCRTRuntime(target_dir, source_dir, target_cpu, dll_pattern, suffix):
     redist_dir = os.path.join(win_sdk_dir, 'Redist')
     version_dirs = glob.glob(os.path.join(redist_dir, '10.*'))
     if len(version_dirs) > 0:
-      version_dirs.sort(reverse=True)
+      _SortByHighestVersionNumberFirst(version_dirs)
       redist_dir = version_dirs[0]
     ucrt_dll_dirs = os.path.join(redist_dir, 'ucrt', 'DLLs', target_cpu)
     ucrt_files = glob.glob(os.path.join(ucrt_dll_dirs, 'api-ms-win-*.dll'))
@@ -246,17 +320,16 @@ def _CopyUCRTRuntime(target_dir, source_dir, target_cpu, dll_pattern, suffix):
     if not suffix.startswith('.'):
       # ucrtbased.dll is located at {win_sdk_dir}/bin/{a.b.c.d}/{target_cpu}/
       # ucrt/.
-      sdk_redist_root = os.path.join(win_sdk_dir, 'bin')
-      sdk_bin_sub_dirs = os.listdir(sdk_redist_root)
+      sdk_bin_root = os.path.join(win_sdk_dir, 'bin')
+      sdk_bin_sub_dirs = glob.glob(os.path.join(sdk_bin_root, '10.*'))
       # Select the most recent SDK if there are multiple versions installed.
-      sdk_bin_sub_dirs.sort(reverse=True)
+      _SortByHighestVersionNumberFirst(sdk_bin_sub_dirs)
       for directory in sdk_bin_sub_dirs:
-        sdk_redist_root_version = os.path.join(sdk_redist_root, directory)
+        sdk_redist_root_version = os.path.join(sdk_bin_root, directory)
         if not os.path.isdir(sdk_redist_root_version):
           continue
-        if re.match(r'10\.\d+\.\d+\.\d+', directory):
-          source_dir = os.path.join(sdk_redist_root_version, target_cpu, 'ucrt')
-          break
+        source_dir = os.path.join(sdk_redist_root_version, target_cpu, 'ucrt')
+        break
     _CopyRuntimeImpl(os.path.join(target_dir, 'ucrtbase' + suffix),
                      os.path.join(source_dir, 'ucrtbase' + suffix))
 
@@ -267,19 +340,18 @@ def FindVCComponentRoot(component):
   version number part changes frequently so the highest version number found is
   used.
   """
-  assert GetVisualStudioVersion() in ['2017', '2019']
+
   SetEnvironmentAndGetRuntimeDllDirs()
   assert ('GYP_MSVS_OVERRIDE_PATH' in os.environ)
   vc_component_msvc_root = os.path.join(os.environ['GYP_MSVS_OVERRIDE_PATH'],
       'VC', component, 'MSVC')
-  vc_component_msvc_contents = os.listdir(vc_component_msvc_root)
+  vc_component_msvc_contents = glob.glob(
+      os.path.join(vc_component_msvc_root, '14.*'))
   # Select the most recent toolchain if there are several.
-  vc_component_msvc_contents.sort(reverse=True)
+  _SortByHighestVersionNumberFirst(vc_component_msvc_contents)
   for directory in vc_component_msvc_contents:
-    if not os.path.isdir(os.path.join(vc_component_msvc_root, directory)):
-      continue
-    if re.match(r'14\.\d+\.\d+', directory):
-      return os.path.join(vc_component_msvc_root, directory)
+    if os.path.isdir(directory):
+      return directory
   raise Exception('Unable to find the VC %s directory.' % component)
 
 
@@ -297,8 +369,7 @@ def _CopyRuntime(target_dir, source_dir, target_cpu, debug):
   directory does exist. Handles VS 2015, 2017 and 2019."""
   suffix = 'd.dll' if debug else '.dll'
   # VS 2015, 2017 and 2019 use the same CRT DLLs.
-  _CopyUCRTRuntime(target_dir, source_dir, target_cpu, '%s140' + suffix,
-                    suffix)
+  _CopyUCRTRuntime(target_dir, source_dir, target_cpu, suffix)
 
 
 def CopyDlls(target_dir, configuration, target_cpu):
@@ -349,17 +420,20 @@ def _CopyDebugger(target_dir, target_cpu):
   # List of debug files that should be copied, the first element of the tuple is
   # the name of the file and the second indicates if it's optional.
   debug_files = [('dbghelp.dll', False), ('dbgcore.dll', True)]
+  # The UCRT is not a redistributable component on arm64.
+  if target_cpu != 'arm64':
+    debug_files.extend([('api-ms-win-downlevel-kernel32-l2-1-0.dll', False),
+                        ('api-ms-win-eventing-provider-l1-1-0.dll', False)])
   for debug_file, is_optional in debug_files:
     full_path = os.path.join(win_sdk_dir, 'Debuggers', target_cpu, debug_file)
     if not os.path.exists(full_path):
       if is_optional:
         continue
       else:
-        # TODO(crbug.com/773476): remove version requirement.
-        raise Exception('%s not found in "%s"\r\nYou must install the '
-                        '"Debugging Tools for Windows" feature from the Windows'
-                        ' 10 SDK.'
-                        % (debug_file, full_path))
+        raise Exception('%s not found in "%s"\r\nYou must install'
+                        'Windows 10 SDK version 10.0.19041.0 including the '
+                        '"Debugging Tools for Windows" feature.' %
+                        (debug_file, full_path))
     target_path = os.path.join(target_dir, debug_file)
     _CopyRuntimeImpl(target_path, full_path)
 
@@ -367,16 +441,10 @@ def _CopyDebugger(target_dir, target_cpu):
 def _GetDesiredVsToolchainHashes():
   """Load a list of SHA1s corresponding to the toolchains that we want installed
   to build with."""
-  env_version = GetVisualStudioVersion()
-  if env_version == '2017':
-    # VS 2017 Update 9 (15.9.3) with 10.0.17763.132 SDK, 10.0.17134 version of
-    # d3dcompiler_47.dll, with ARM64 libraries.
-    toolchain_hash = '818a152b3f1da991c1725d85be19a0f27af6bab4'
-    # Third parties that do not have access to the canonical toolchain can map
-    # canonical toolchain version to their own toolchain versions.
-    toolchain_hash_mapping_key = 'GYP_MSVS_HASH_%s' % toolchain_hash
-    return [os.environ.get(toolchain_hash_mapping_key, toolchain_hash)]
-  raise Exception('Unsupported VS version %s' % env_version)
+  # Third parties that do not have access to the canonical toolchain can map
+  # canonical toolchain version to their own toolchain versions.
+  toolchain_hash_mapping_key = 'GYP_MSVS_HASH_%s' % TOOLCHAIN_HASH
+  return [os.environ.get(toolchain_hash_mapping_key, TOOLCHAIN_HASH)]
 
 
 def ShouldUpdateToolchain():
@@ -407,8 +475,7 @@ def Update(force=False, no_download=False):
 
   depot_tools_win_toolchain = \
       bool(int(os.environ.get('DEPOT_TOOLS_WIN_TOOLCHAIN', '1')))
-  if ((sys.platform in ('win32', 'cygwin') or force) and
-        depot_tools_win_toolchain):
+  if (_HostIsWindows() or force) and depot_tools_win_toolchain:
     import find_depot_tools
     depot_tools_path = find_depot_tools.add_depot_tools_to_path()
 
@@ -436,9 +503,6 @@ def Update(force=False, no_download=False):
       subprocess.check_call([
           ciopfs, '-o', 'use_ino', toolchain_dir + '.ciopfs', toolchain_dir])
 
-    # Necessary so that get_toolchain_if_necessary.py will put the VS toolkit
-    # in the correct directory.
-    os.environ['GYP_MSVS_VERSION'] = GetVisualStudioVersion()
     get_toolchain_args = [
         sys.executable,
         os.path.join(depot_tools_path,

@@ -20,6 +20,12 @@ STATUS_CODE_SKIP = -3
 # http://junit.org/junit4/javadoc/4.12/org/junit/AssumptionViolatedException.html
 STATUS_CODE_ASSUMPTION_FAILURE = -4
 
+STATUS_CODE_TEST_DURATION = 1337
+
+# When a test batch fails due to post-test Assertion failures (eg.
+# LifetimeAssert).
+STATUS_CODE_BATCH_FAILURE = 1338
+
 # http://developer.android.com/reference/android/app/Activity.html
 RESULT_CODE_OK = -1
 RESULT_CODE_CANCELED = 0
@@ -39,11 +45,11 @@ class InstrumentationParser(object):
 
       for code, bundle in parser.IterStatus():
         # do something with each instrumentation status
-        print 'status:', code, bundle
+        print('status:', code, bundle)
 
       # do something with the final instrumentation result
       code, bundle = parser.GetResult()
-      print 'result:', code, bundle
+      print('result:', code, bundle)
 
     Args:
       stream: a sequence of lines as produced by the raw output of an

@@ -30,6 +30,8 @@ char kLSanDefaultSuppressions[] =
 
     // Leaks in Nvidia's libGL.
     "leak:libGL.so\n"
+    "leak:libGLX_nvidia.so\n"
+    "leak:libnvidia-glcore.so\n"
 
     // XRandR has several one time leaks.
     "leak:libxrandr\n"
@@ -53,15 +55,19 @@ char kLSanDefaultSuppressions[] =
     // impossible, i.e. when enabling leak detection for the first time for a
     // test target with pre-existing leaks.
 
-    // http://crbug.com/356306
-    "leak:service_manager::SetProcessTitleFromCommandLine\n"
-
     // https://crbug.com/755670
     "leak:third_party/yasm/\n"
 
     // v8 leaks caused by weak ref not call
     "leak:blink::DOMWrapperWorld::Create\n"
     "leak:blink::ScriptState::Create\n"
+
+    // Crash keys are intentionally leaked.
+    "leak:crash_reporter::(anonymous "
+    "namespace)::CrashKeyBaseSupport::Allocate\n"
+
+    // Suppress leaks in CreateCdmInstance. https://crbug.com/961062
+    "leak:media::CdmAdapter::CreateCdmInstance\n"
 
     // PLEASE READ ABOVE BEFORE ADDING NEW SUPPRESSIONS.
 

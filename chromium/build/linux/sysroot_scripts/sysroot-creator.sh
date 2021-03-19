@@ -48,6 +48,7 @@ readonly HAS_ARCH_AMD64=${HAS_ARCH_AMD64:=0}
 readonly HAS_ARCH_I386=${HAS_ARCH_I386:=0}
 readonly HAS_ARCH_ARM=${HAS_ARCH_ARM:=0}
 readonly HAS_ARCH_ARM64=${HAS_ARCH_ARM64:=0}
+readonly HAS_ARCH_ARMEL=${HAS_ARCH_ARMEL:=0}
 readonly HAS_ARCH_MIPS=${HAS_ARCH_MIPS:=0}
 readonly HAS_ARCH_MIPS64EL=${HAS_ARCH_MIPS64EL:=0}
 
@@ -65,6 +66,7 @@ readonly DEBIAN_DEP_LIST_AMD64="generated_package_lists/${DIST}.amd64"
 readonly DEBIAN_DEP_LIST_I386="generated_package_lists/${DIST}.i386"
 readonly DEBIAN_DEP_LIST_ARM="generated_package_lists/${DIST}.arm"
 readonly DEBIAN_DEP_LIST_ARM64="generated_package_lists/${DIST}.arm64"
+readonly DEBIAN_DEP_LIST_ARMEL="generated_package_lists/${DIST}.armel"
 readonly DEBIAN_DEP_LIST_MIPS="generated_package_lists/${DIST}.mipsel"
 readonly DEBIAN_DEP_LIST_MIPS64EL="generated_package_lists/${DIST}.mips64el"
 
@@ -92,6 +94,22 @@ Usage() {
 }
 
 
+DownloadOrCopyNonUniqueFilename() {
+  # Use this function instead of DownloadOrCopy when the url uniquely
+  # identifies the file, but the filename (excluding the directory)
+  # does not.
+  local url="$1"
+  local dest="$2"
+
+  local hash="$(echo "$url" | sha256sum | cut -d' ' -f1)"
+
+  DownloadOrCopy "${url}" "${dest}.${hash}"
+  # cp the file to prevent having to redownload it, but mv it to the
+  # final location so that it's atomic.
+  cp "${dest}.${hash}" "${dest}.$$"
+  mv "${dest}.$$" "${dest}"
+}
+
 DownloadOrCopy() {
   if [ -f "$2" ] ; then
     echo "$2 already in place"
@@ -104,10 +122,25 @@ DownloadOrCopy() {
     SubBanner "downloading from $1 -> $2"
     # Appending the "$$" shell pid is necessary here to prevent concurrent
     # instances of sysroot-creator.sh from trying to write to the same file.
-    # --create-dirs is added in case there are slashes in the filename, as can
-    # happen with the "debian/security" release class.
-    curl -L "$1" --create-dirs -o "${2}.partial.$$"
-    mv "${2}.partial.$$" $2
+    local temp_file="${2}.partial.$$"
+    # curl --retry doesn't retry when the page gives a 4XX error, so we need to
+    # manually rerun.
+    for i in {1..10}; do
+      # --create-dirs is added in case there are slashes in the filename, as can
+      # happen with the "debian/security" release class.
+      local http_code=$(curl -L "$1" --create-dirs -o "${temp_file}" \
+                        -w "%{http_code}")
+      if [ ${http_code} -eq 200 ]; then
+        break
+      fi
+      echo "Bad HTTP code ${http_code} when downloading $1"
+      rm -f "${temp_file}"
+      sleep $i
+    done
+    if [ ! -f "${temp_file}" ]; then
+      exit 1
+    fi
+    mv "${temp_file}" $2
   else
     SubBanner "copying from $1"
     cp "$1" "$2"
@@ -116,27 +149,33 @@ DownloadOrCopy() {
 
 
 SetEnvironmentVariables() {
-  ARCH=""
-  echo $1 | grep -qs Amd64$ && ARCH=AMD64
-  if [ -z "$ARCH" ]; then
-    echo $1 | grep -qs I386$ && ARCH=I386
-  fi
-  if [ -z "$ARCH" ]; then
-    echo $1 | grep -qs Mips64el$ && ARCH=MIPS64EL
-  fi
-  if [ -z "$ARCH" ]; then
-    echo $1 | grep -qs Mips$ && ARCH=MIPS
-  fi
-  if [ -z "$ARCH" ]; then
-    echo $1 | grep -qs ARM$ && ARCH=ARM
-  fi
-  if [ -z "$ARCH" ]; then
-    echo $1 | grep -qs ARM64$ && ARCH=ARM64
-  fi
-  if [ -z "${ARCH}" ]; then
-    echo "ERROR: Unable to determine architecture based on: $1"
-    exit 1
-  fi
+  case $1 in
+    *Amd64)
+      ARCH=AMD64
+      ;;
+    *I386)
+      ARCH=I386
+      ;;
+    *Mips64el)
+      ARCH=MIPS64EL
+      ;;
+    *Mips)
+      ARCH=MIPS
+      ;;
+    *ARM)
+      ARCH=ARM
+      ;;
+    *ARM64)
+      ARCH=ARM64
+      ;;
+    *ARMEL)
+      ARCH=ARMEL
+      ;;
+    *)
+      echo "ERROR: Unable to determine architecture based on: $1"
+      exit 1
+      ;;
+  esac
   ARCH_LOWER=$(echo $ARCH | tr '[:upper:]' '[:lower:]')
 }
 
@@ -208,7 +247,7 @@ GeneratePackageListDist() {
   local package_file_arch="${repo_name}/binary-${arch}/Packages.${PACKAGES_EXT}"
   local package_list_arch="${repo_basedir}/${package_file_arch}"
 
-  DownloadOrCopy "${package_list_arch}" "${package_list}"
+  DownloadOrCopyNonUniqueFilename "${package_list_arch}" "${package_list}"
   VerifyPackageListing "${package_file_arch}" "${package_list}" ${repo} ${dist}
   ExtractPackageXz "${package_list}" "${TMP_PACKAGE_LIST}" ${repo}
 }
@@ -219,7 +258,6 @@ GeneratePackageListCommon() {
   local packages="$3"
 
   local dists="${DIST} ${DIST_UPDATES:-}"
-  local repos="main ${REPO_EXTRA:-}"
 
   local list_base="${BUILD_DIR}/Packages.${DIST}_${arch}"
   > "${list_base}"  # Create (or truncate) a zero-length file.
@@ -249,6 +287,11 @@ GeneratePackageListARM() {
 GeneratePackageListARM64() {
   GeneratePackageListCommon "$1" arm64 "${DEBIAN_PACKAGES}
     ${DEBIAN_PACKAGES_ARM64:=}"
+}
+
+GeneratePackageListARMEL() {
+  GeneratePackageListCommon "$1" armel "${DEBIAN_PACKAGES}
+    ${DEBIAN_PACKAGES_ARMEL:=}"
 }
 
 GeneratePackageListMips() {
@@ -283,15 +326,41 @@ HacksAndPatchesCommon() {
   sed -i -e 's|/usr/lib/${arch}-${os}/||g'  ${lscripts}
   sed -i -e 's|/lib/${arch}-${os}/||g' ${lscripts}
 
-  # Unversion libdbus symbols.  This is required because libdbus-1-3
-  # switched from unversioned symbols to versioned ones, and we must
-  # still support distros using the unversioned library.  This hack
-  # can be removed once support for Ubuntu Trusty and Debian Jessie
-  # are dropped.
+  # Unversion libdbus and libxkbcommon symbols.  This is required because
+  # libdbus-1-3 and libxkbcommon0 switched from unversioned symbols to versioned
+  # ones, and we must still support distros using the unversioned library.  This
+  # hack can be removed once support for Ubuntu Trusty and Debian Jessie are
+  # dropped.
   ${strip} -R .gnu.version_d -R .gnu.version \
     "${INSTALL_ROOT}/lib/${arch}-${os}/libdbus-1.so.3"
   cp "${SCRIPT_DIR}/libdbus-1-3-symbols" \
     "${INSTALL_ROOT}/debian/libdbus-1-3/DEBIAN/symbols"
+
+  ${strip} -R .gnu.version_d -R .gnu.version \
+    "${INSTALL_ROOT}/usr/lib/${arch}-${os}/libxkbcommon.so.0.0.0"
+  cp "${SCRIPT_DIR}/libxkbcommon0-symbols" \
+    "${INSTALL_ROOT}/debian/libxkbcommon0/DEBIAN/symbols"
+
+  # libxcomposite1 is missing a symbols file.
+  cp "${SCRIPT_DIR}/libxcomposite1-symbols" \
+    "${INSTALL_ROOT}/debian/libxcomposite1/DEBIAN/symbols"
+
+  # Shared objects depending on libdbus-1.so.3 have unsatisfied undefined
+  # versioned symbols. To avoid LLD --no-allow-shlib-undefined errors, rewrite
+  # DT_NEEDED entries from libdbus-1.so.3 to a different string. LLD will
+  # suppress --no-allow-shlib-undefined diagnostics for such shared objects.
+  set +e
+  for f in "${INSTALL_ROOT}/lib/${arch}-${os}"/*.so \
+           "${INSTALL_ROOT}/usr/lib/${arch}-${os}"/*.so; do
+    echo "$f" | grep -q 'libdbus-1.so$' && continue
+    # In a dependent shared object, the only occurrence of "libdbus-1.so.3" is
+    # the string referenced by the DT_NEEDED entry.
+    offset=$(LANG=C grep -abo libdbus-1.so.3 "$f")
+    [ -n "$offset" ] || continue
+    echo -n 'libdbus-1.so.0' | dd of="$f" conv=notrunc bs=1 \
+      seek="$(echo -n "$offset" | cut -d : -f 1)" status=none
+  done
+  set -e
 
   # Glibc 2.27 introduced some new optimizations to several math functions, but
   # it will be a while before it makes it into all supported distros.  Luckily,
@@ -310,6 +379,19 @@ HacksAndPatchesCommon() {
   local libc_so="${INSTALL_ROOT}/lib/${arch}-${os}/libc.so.6"
   nm -D --defined-only --with-symbol-versions "${libc_so}" | \
     "${SCRIPT_DIR}/find_incompatible_glibc_symbols.py" >> "${glob_h}"
+
+  # fcntl64() was introduced in glibc 2.28.  Make sure to use fcntl() instead.
+  local fcntl_h="${INSTALL_ROOT}/usr/include/fcntl.h"
+  sed -i '{N; s/#ifndef __USE_FILE_OFFSET64\(\nextern int fcntl\)/#if 1\1/}' \
+      "${fcntl_h}"
+  # On i386, fcntl() was updated in glibc 2.28.
+  nm -D --defined-only --with-symbol-versions "${libc_so}" | \
+    "${SCRIPT_DIR}/find_incompatible_glibc_symbols.py" >> "${fcntl_h}"
+
+  # __GLIBC_MINOR__ is used as a feature test macro.  Replace it with the
+  # earliest supported version of glibc (2.17, https://crbug.com/376567).
+  local features_h="${INSTALL_ROOT}/usr/include/features.h"
+  sed -i 's|\(#define\s\+__GLIBC_MINOR__\)|\1 17 //|' "${features_h}"
 
   # This is for chrome's ./build/linux/pkg-config-wrapper
   # which overwrites PKG_CONFIG_LIBDIR internally
@@ -334,13 +416,15 @@ HacksAndPatchesARM() {
   HacksAndPatchesCommon arm linux-gnueabihf arm-linux-gnueabihf-strip
 }
 
-
 HacksAndPatchesARM64() {
   # Use the unstripped libdbus for arm64 to prevent linker errors.
   # https://bugs.chromium.org/p/webrtc/issues/detail?id=8535
   HacksAndPatchesCommon aarch64 linux-gnu true
 }
 
+HacksAndPatchesARMEL() {
+  HacksAndPatchesCommon arm linux-gnueabi arm-linux-gnueabi-strip
+}
 
 HacksAndPatchesMips() {
   HacksAndPatchesCommon mipsel linux-gnu mipsel-linux-gnu-strip
@@ -389,12 +473,8 @@ InstallIntoSysroot() {
     dpkg-deb -e ${package} ${INSTALL_ROOT}/debian/${base_package}/DEBIAN
   done
 
-  # Prune /usr/share, leaving only pkgconfig
-  for name in ${INSTALL_ROOT}/usr/share/*; do
-    if [ "${name}" != "${INSTALL_ROOT}/usr/share/pkgconfig" ]; then
-      rm -r ${name}
-    fi
-  done
+  # Prune /usr/share, leaving only pkgconfig.
+  ls -d ${INSTALL_ROOT}/usr/share/* | grep -v "/pkgconfig$" | xargs rm -r
 }
 
 
@@ -407,6 +487,7 @@ CleanupJailSymlinks() {
   if [ "${ARCH}" != "MIPS" ]; then
     libdirs="${libdirs} lib64"
   fi
+
   find $libdirs -type l -printf '%p %l\n' | while read link target; do
     # skip links with non-absolute paths
     echo "${target}" | grep -qs ^/ || continue
@@ -432,6 +513,7 @@ VerifyLibraryDepsCommon() {
   local arch=$1
   local os=$2
   local find_dirs=(
+    "${INSTALL_ROOT}/lib/"
     "${INSTALL_ROOT}/lib/${arch}-${os}/"
     "${INSTALL_ROOT}/usr/lib/${arch}-${os}/"
   )
@@ -440,6 +522,8 @@ VerifyLibraryDepsCommon() {
       grep ': ELF' | sed 's/^\(.*\): .*$/\1/' | xargs readelf -d | \
       grep NEEDED | sort | uniq | sed 's/^.*Shared library: \[\(.*\)\]$/\1/g')"
   local all_libs="$(find ${find_dirs[*]} -printf '%f\n')"
+  # Ignore missing libdbus-1.so.0
+  all_libs+="$(echo -e '\nlibdbus-1.so.0')"
   local missing_libs="$(grep -vFxf <(echo "${all_libs}") \
     <(echo "${needed_libs}"))"
   if [ ! -z "${missing_libs}" ]; then
@@ -469,6 +553,9 @@ VerifyLibraryDepsARM64() {
   VerifyLibraryDepsCommon aarch64 linux-gnu
 }
 
+VerifyLibraryDepsARMEL() {
+  VerifyLibraryDepsCommon arm linux-gnueabi
+}
 
 VerifyLibraryDepsMips() {
   VerifyLibraryDepsCommon mipsel linux-gnu
@@ -561,6 +648,26 @@ BuildSysrootARM64() {
 }
 
 #@
+#@ BuildSysrootARMEL
+#@
+#@    Build everything and package it
+BuildSysrootARMEL() {
+  if [ "$HAS_ARCH_ARMEL" = "0" ]; then
+    return
+  fi
+  ClearInstallDir
+  local package_file="${DEBIAN_DEP_LIST_ARMEL}"
+  GeneratePackageListARMEL "$package_file"
+  local files_and_sha256sums="$(cat ${package_file})"
+  StripChecksumsFromPackageList "$package_file"
+  InstallIntoSysroot ${files_and_sha256sums}
+  CleanupJailSymlinks
+  HacksAndPatchesARMEL
+  VerifyLibraryDepsARMEL
+  CreateTarBall
+}
+
+#@
 #@ BuildSysrootMips
 #@
 #@    Build everything and package it
@@ -609,6 +716,7 @@ BuildSysrootAll() {
   RunCommand BuildSysrootI386
   RunCommand BuildSysrootARM
   RunCommand BuildSysrootARM64
+  RunCommand BuildSysrootARMEL
   RunCommand BuildSysrootMips
   RunCommand BuildSysrootMips64el
 }
@@ -616,7 +724,7 @@ BuildSysrootAll() {
 UploadSysroot() {
   local sha=$(sha1sum "${TARBALL}" | awk '{print $1;}')
   set -x
-  gsutil cp -a public-read "${TARBALL}" \
+  gsutil.py cp -a public-read "${TARBALL}" \
       "gs://chrome-linux-sysroot/toolchain/$sha/"
   set +x
 }
@@ -662,6 +770,16 @@ UploadSysrootARM64() {
 }
 
 #@
+#@ UploadSysrootARMEL
+#@
+UploadSysrootARMEL() {
+  if [ "$HAS_ARCH_ARMEL" = "0" ]; then
+    return
+  fi
+  UploadSysroot "$@"
+}
+
+#@
 #@ UploadSysrootMips
 #@
 UploadSysrootMips() {
@@ -690,6 +808,7 @@ UploadSysrootAll() {
   RunCommand UploadSysrootI386 "$@"
   RunCommand UploadSysrootARM "$@"
   RunCommand UploadSysrootARM64 "$@"
+  RunCommand UploadSysrootARMEL "$@"
   RunCommand UploadSysrootMips "$@"
   RunCommand UploadSysrootMips64el "$@"
 
@@ -728,8 +847,8 @@ VerifyPackageListing() {
 
   CheckForDebianGPGKeyring
 
-  DownloadOrCopy ${release_list} ${release_file}
-  DownloadOrCopy ${release_list_gpg} ${release_file_gpg}
+  DownloadOrCopyNonUniqueFilename ${release_list} ${release_file}
+  DownloadOrCopyNonUniqueFilename ${release_list_gpg} ${release_file_gpg}
   echo "Verifying: ${release_file} with ${release_file_gpg}"
   set -x
   gpgv --keyring "${KEYRING_FILE}" "${release_file_gpg}" "${release_file}"
@@ -795,6 +914,9 @@ PrintArchitectures() {
   fi
   if [ "$HAS_ARCH_ARM64" = "1" ]; then
     echo ARM64
+  fi
+  if [ "$HAS_ARCH_ARMEL" = "1" ]; then
+    echo ARMEL
   fi
   if [ "$HAS_ARCH_MIPS" = "1" ]; then
     echo Mips

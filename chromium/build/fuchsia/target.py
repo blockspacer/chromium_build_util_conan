@@ -2,29 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import boot_data
 import common
 import json
 import logging
 import os
 import remote_cmd
-import shutil
+import runner_logs
 import subprocess
-import sys
-import tempfile
 import time
 
 
 _SHUTDOWN_CMD = ['dm', 'poweroff']
-_ATTACH_MAX_RETRIES = 10
 _ATTACH_RETRY_INTERVAL = 1
-
-_PM = os.path.join(common.SDK_ROOT, 'tools', 'pm')
-_REPO_NAME = 'chrome_runner'
+_ATTACH_RETRY_SECONDS = 120
 
 # Amount of time to wait for Amber to complete package installation, as a
 # mitigation against hangs due to amber/network-related failures.
-_INSTALL_TIMEOUT_SECS = 5 * 60
+_INSTALL_TIMEOUT_SECS = 10 * 60
+
+
+def _GetPackageUri(package_name):
+  """Returns the URI for the specified package name."""
+  return 'fuchsia-pkg://fuchsia.com/%s' % (package_name)
 
 
 def _GetPackageInfo(package_path):
@@ -36,25 +35,21 @@ def _GetPackageInfo(package_path):
   return (package_info['name'], package_info['version'])
 
 
-def _PublishPackage(tuf_root, package_path):
-  """Publishes a combined FAR package to a TUF repository root."""
+class _MapIsolatedPathsForPackage:
+  """Callable object which remaps /data and /tmp paths to their component-
+     specific locations, based on the package name and test realm path."""
 
-  subprocess.check_call(
-      [_PM, 'publish', '-a', '-f', package_path, '-r', tuf_root, '-vt', '-v'],
-      stderr=subprocess.STDOUT)
-
-
-class _MapRemoteDataPathForPackage:
-  """Callable object which remaps /data paths to their package-specific
-     locations."""
-
-  def __init__(self, package_name, package_version):
-    self.data_path = '/data/r/sys/fuchsia.com:{0}:{1}#meta:{0}.cmx'.format(
-        package_name, package_version)
+  def __init__(self, package_name, package_version, realms):
+    realms_path_fragment = '/r/'.join(['r/sys'] + realms)
+    package_sub_path = '{2}/fuchsia.com:{0}:{1}#meta:{0}.cmx/'.format(
+        package_name, package_version, realms_path_fragment)
+    self.isolated_format = '{0}' + package_sub_path + '{1}'
 
   def __call__(self, path):
-    if path[:5] == '/data':
-      return self.data_path + path[5:]
+    for isolated_directory in ['/data/' , '/tmp/']:
+      if (path+'/').startswith(isolated_directory):
+        return self.isolated_format.format(isolated_directory,
+                                           path[len(isolated_directory):])
     return path
 
 
@@ -66,18 +61,31 @@ class FuchsiaTargetException(Exception):
 class Target(object):
   """Base class representing a Fuchsia deployment target."""
 
-  def __init__(self, output_dir, target_cpu):
-    self._output_dir = output_dir
+  def __init__(self, out_dir, target_cpu):
+    self._out_dir = out_dir
     self._started = False
     self._dry_run = False
     self._target_cpu = target_cpu
     self._command_runner = None
 
+  @staticmethod
+  def RegisterArgs(arg_parser):
+    common_args = arg_parser.add_argument_group(
+        'target', 'Arguments that apply to all targets.')
+    common_args.add_argument(
+        '--out-dir',
+        type=os.path.realpath,
+        help=('Path to the directory in which build files are located. '
+              'Defaults to current directory.'))
+    common_args.add_argument('--system-log-file',
+                             help='File to write system logs to. Specify '
+                             '- to log to stdout.')
+
   # Functions used by the Python context manager for teardown.
   def __enter__(self):
     return self
   def __exit__(self, exc_type, exc_val, exc_tb):
-    return self
+    return
 
   def Start(self):
     """Handles the instantiation and connection process for the Fuchsia
@@ -135,25 +143,42 @@ class Target(object):
     return self.GetCommandRunner().RunCommand(command, silent,
                                               timeout_secs=timeout_secs)
 
-  def EnsurePackageDataDirectoryExists(self, package_name):
-    """Ensures that the specified package's isolated /data directory exists."""
-    return self.RunCommand(
-      ['mkdir','-p',_MapRemoteDataPathForPackage(package_name, 0)('/data')])
+  def EnsureIsolatedPathsExist(self, for_package, for_realms):
+    """Ensures that the package's isolated /data and /tmp exist."""
+    for isolated_directory in ['/data', '/tmp']:
+      self.RunCommand([
+          'mkdir', '-p',
+          _MapIsolatedPathsForPackage(for_package, 0,
+                                      for_realms)(isolated_directory)
+      ])
 
-  def PutFile(self, source, dest, recursive=False, for_package=None):
+  def PutFile(self,
+              source,
+              dest,
+              recursive=False,
+              for_package=None,
+              for_realms=[]):
     """Copies a file from the local filesystem to the target filesystem.
 
     source: The path of the file being copied.
     dest: The path on the remote filesystem which will be copied to.
     recursive: If true, performs a recursive copy.
-    for_package: If specified, /data in the |dest| is mapped to the package's
-                 isolated /data location.
+    for_package: If specified, isolated paths in the |dest| are mapped to their
+                 obsolute paths for the package, on the target. This currently
+                 affects the /data and /tmp directories.
+    for_realms: If specified, identifies the sub-realm of 'sys' under which
+                isolated paths (see |for_package|) are stored.
     """
 
     assert type(source) is str
-    self.PutFiles([source], dest, recursive, for_package)
+    self.PutFiles([source], dest, recursive, for_package, for_realms)
 
-  def PutFiles(self, sources, dest, recursive=False, for_package=None):
+  def PutFiles(self,
+               sources,
+               dest,
+               recursive=False,
+               for_package=None,
+               for_realms=[]):
     """Copies files from the local filesystem to the target filesystem.
 
     sources: List of local file paths to copy from, or a single path.
@@ -161,42 +186,62 @@ class Target(object):
     recursive: If true, performs a recursive copy.
     for_package: If specified, /data in the |dest| is mapped to the package's
                  isolated /data location.
+    for_realms: If specified, identifies the sub-realm of 'sys' under which
+                isolated paths (see |for_package|) are stored.
     """
 
     assert type(sources) is tuple or type(sources) is list
     if for_package:
-      self.EnsurePackageDataDirectoryExists(for_package)
-      dest = _MapRemoteDataPathForPackage(for_package, 0)(dest)
+      self.EnsureIsolatedPathsExist(for_package, for_realms)
+      dest = _MapIsolatedPathsForPackage(for_package, 0, for_realms)(dest)
     logging.debug('copy local:%s => remote:%s' % (sources, dest))
     self.GetCommandRunner().RunScp(sources, dest, remote_cmd.COPY_TO_TARGET,
                                    recursive)
 
-  def GetFile(self, source, dest, for_package=None):
+  def GetFile(self,
+              source,
+              dest,
+              for_package=None,
+              for_realms=[],
+              recursive=False):
     """Copies a file from the target filesystem to the local filesystem.
 
     source: The path of the file being copied.
     dest: The path on the local filesystem which will be copied to.
     for_package: If specified, /data in paths in |sources| is mapped to the
                  package's isolated /data location.
+    for_realms: If specified, identifies the sub-realm of 'sys' under which
+                isolated paths (see |for_package|) are stored.
+    recursive: If true, performs a recursive copy.
     """
     assert type(source) is str
-    self.GetFiles([source], dest, for_package)
+    self.GetFiles([source], dest, for_package, for_realms, recursive)
 
-  def GetFiles(self, sources, dest, for_package=None):
+  def GetFiles(self,
+               sources,
+               dest,
+               for_package=None,
+               for_realms=[],
+               recursive=False):
     """Copies files from the target filesystem to the local filesystem.
 
     sources: List of remote file paths to copy.
     dest: The path on the local filesystem which will be copied to.
     for_package: If specified, /data in paths in |sources| is mapped to the
                  package's isolated /data location.
+    for_realms: If specified, identifies the sub-realm of 'sys' under which
+                isolated paths (see |for_package|) are stored.
+    recursive: If true, performs a recursive copy.
     """
     assert type(sources) is tuple or type(sources) is list
     self._AssertIsStarted()
     if for_package:
-      sources = map(_MapRemoteDataPathForPackage(for_package, 0), sources)
+      sources = map(_MapIsolatedPathsForPackage(for_package, 0, for_realms),
+                    sources)
     logging.debug('copy remote:%s => local:%s' % (sources, dest))
     return self.GetCommandRunner().RunScp(sources, dest,
-                                          remote_cmd.COPY_FROM_TARGET)
+                                          remote_cmd.COPY_FROM_TARGET,
+                                          recursive)
 
   def _GetEndpoint(self):
     """Returns a (host, port) tuple for the SSH connection to the target."""
@@ -211,13 +256,19 @@ class Target(object):
   def _AssertIsStarted(self):
     assert self.IsStarted()
 
-  def _WaitUntilReady(self, retries=_ATTACH_MAX_RETRIES):
+  def _WaitUntilReady(self):
     logging.info('Connecting to Fuchsia using SSH.')
 
-    for retry in xrange(retries + 1):
-      host, port = self._GetEndpoint()
+    host, port = self._GetEndpoint()
+    end_time = time.time() + _ATTACH_RETRY_SECONDS
+    ssh_diagnostic_log = runner_logs.FileStreamFor('ssh_diagnostic_log')
+    while time.time() < end_time:
       runner = remote_cmd.CommandRunner(self._GetSshConfigPath(), host, port)
-      if runner.RunCommand(['true'], True) == 0:
+      ssh_proc = runner.RunCommandPiped(['true'],
+                                        ssh_args=['-v'],
+                                        stdout=ssh_diagnostic_log,
+                                        stderr=subprocess.STDOUT)
+      if ssh_proc.wait() == 0:
         logging.info('Connected!')
         self._started = True
         return True
@@ -230,117 +281,53 @@ class Target(object):
   def _GetSshConfigPath(self, path):
     raise NotImplementedError
 
-  # TODO: remove this once all instances of architecture names have been
-  # converted to the new naming pattern.
-  def _GetTargetSdkLegacyArch(self):
-    """Returns the Fuchsia SDK architecture name for the target CPU."""
-    if self._target_cpu == 'arm64':
-      return 'aarch64'
-    elif self._target_cpu == 'x64':
-      return 'x86_64'
-    raise Exception('Unknown target_cpu %s:' % self._target_cpu)
+  def GetAmberRepo(self):
+    """Returns an AmberRepo instance which serves packages for this Target.
+    Callers should typically call GetAmberRepo() in a |with| statement, and
+    install and execute commands inside the |with| block, so that the returned
+    AmberRepo can teardown correctly, if necessary.
+    """
+    pass
 
-
-  def InstallPackage(self, package_path, package_name, package_deps):
+  def InstallPackage(self, package_paths):
     """Installs a package and it's dependencies on the device. If the package is
     already installed then it will be updated to the new version.
 
-    package_path: Path to the .far file to be installed.
-    package_name: Package name.
-    package_deps: List of .far files with the packages that the main package
-                  depends on. These packages are installed or updated as well.
-    """
-    try:
-      tuf_root = tempfile.mkdtemp()
-      pm_serve_task = None
+    package_paths: Paths to the .far files to install."""
 
+    with self.GetAmberRepo() as amber_repo:
       # Publish all packages to the serving TUF repository under |tuf_root|.
-      subprocess.check_call([_PM, 'newrepo', '-repo', tuf_root])
-      all_packages = [package_path] + package_deps
-      for next_package_path in all_packages:
-        _PublishPackage(tuf_root, next_package_path)
+      for package_path in package_paths:
+        amber_repo.PublishPackage(package_path)
 
-      # Serve the |tuf_root| using 'pm serve' and configure the target to pull
-      # from it.
-      serve_port = common.GetAvailableTcpPort()
-      pm_serve_task = subprocess.Popen(
-          [_PM, 'serve', '-d', os.path.join(tuf_root, 'repository'), '-l',
-           ':%d' % serve_port, '-q'])
-      remote_port = common.ConnectPortForwardingTask(self, serve_port, 0)
-      self._RegisterAmberRepository(tuf_root, remote_port)
-
-      # Install all packages.
-      for next_package_path in all_packages:
-        install_package_name, package_version = \
-            _GetPackageInfo(next_package_path)
-        logging.info('Installing %s version %s.' %
-                     (install_package_name, package_version))
-        return_code = self.RunCommand(['amberctl', 'get_up', '-n',
-                                       install_package_name, '-v',
-                                       package_version],
-                                       timeout_secs=_INSTALL_TIMEOUT_SECS)
+      # Resolve all packages, to have them pulled into the device/VM cache.
+      for package_path in package_paths:
+        package_name, package_version = _GetPackageInfo(package_path)
+        logging.info('Resolving %s into cache.' % (package_name))
+        return_code = self.RunCommand(
+            ['pkgctl', 'resolve',
+             _GetPackageUri(package_name), '>/dev/null'],
+            timeout_secs=_INSTALL_TIMEOUT_SECS)
         if return_code != 0:
-          raise Exception('Error while installing %s.' % install_package_name)
+          raise Exception('Error while resolving %s.' % package_name)
 
-    finally:
-      self._UnregisterAmberRepository()
-      if pm_serve_task:
-        pm_serve_task.kill()
-      shutil.rmtree(tuf_root)
+      # Verify that the newly resolved versions of packages are reported.
+      for package_path in package_paths:
+        # Use pkgctl get-hash to determine which version will be resolved.
+        package_name, package_version = _GetPackageInfo(package_path)
+        pkgctl = self.RunCommandPiped(
+            ['pkgctl', 'get-hash',
+             _GetPackageUri(package_name)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        pkgctl_out, pkgctl_err = pkgctl.communicate()
 
-
-  def _RegisterAmberRepository(self, tuf_repo, remote_port):
-    """Configures a device to use a local TUF repository as an installation
-    source for packages.
-    |tuf_repo|: The host filesystem path to the TUF repository.
-    |remote_port|: The reverse-forwarded port used to connect to instance of
-                   `pm serve` that is serving the contents of |tuf_repo|."""
-
-    # Extract the public signing key for inclusion in the config file.
-    root_keys = []
-    root_json_path = os.path.join(tuf_repo, 'repository', 'root.json')
-    root_json = json.load(open(root_json_path, 'r'))
-    for root_key_id in root_json['signed']['roles']['root']['keyids']:
-      root_keys.append({
-          'Type': root_json['signed']['keys'][root_key_id]['keytype'],
-          'Value': root_json['signed']['keys'][root_key_id]['keyval']['public']
-      })
-
-    # "pm serve" can automatically generate a "config.json" file at query time,
-    # but the file is unusable because it specifies URLs with port
-    # numbers that are unreachable from across the port forwarding boundary.
-    # So instead, we generate our own config file with the forwarded port
-    # numbers instead.
-    config_file = open(os.path.join(tuf_repo, 'repository', 'repo_config.json'),
-                       'w')
-    json.dump({
-        'ID': _REPO_NAME,
-        'RepoURL': "http://127.0.0.1:%d" % remote_port,
-        'BlobRepoURL': "http://127.0.0.1:%d/blobs" % remote_port,
-        'RatePeriod': 10,
-        'RootKeys': root_keys,
-        'StatusConfig': {
-            'Enabled': True
-        },
-        'Auto': True
-    }, config_file)
-    config_file.close()
-
-    # Register the repo.
-    return_code = self.RunCommand(
-        [('amberctl rm_src -n %s; ' +
-          'amberctl add_src -f http://127.0.0.1:%d/repo_config.json')
-         % (_REPO_NAME, remote_port)])
-    if return_code != 0:
-      raise Exception('Error code %d when running amberctl.' % return_code)
-
-
-  def _UnregisterAmberRepository(self):
-    """Unregisters the Amber repository."""
-
-    logging.debug('Unregistering Amber repository.')
-    self.RunCommand(['amberctl', 'rm_src', '-n', _REPO_NAME])
-
-    # Re-enable 'devhost' repo if it's present. This is useful for devices that
-    # were booted with 'fx serve'.
-    self.RunCommand(['amberctl', 'enable_src', '-n', 'devhost'], silent=True)
+        # Read the expected version from the meta.far Merkel hash file alongside
+        # the package's FAR.
+        meta_far_path = os.path.join(os.path.dirname(package_path), 'meta.far')
+        meta_far_merkel = subprocess.check_output(
+            [common.GetHostToolPathFromPlatform('merkleroot'),
+             meta_far_path]).split()[0]
+        if pkgctl_out != meta_far_merkel:
+          raise Exception('Hash mismatch for %s after resolve (%s vs %s).' %
+                          (package_name, pkgctl_out, meta_far_merkel))

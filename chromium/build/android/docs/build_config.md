@@ -67,7 +67,6 @@ This will end up generating the following JSON file under
       "resource_zips/ui/android/ui_strings_grd.resources.zip"
     ],
     "extra_package_names": [],
-    "extra_r_text_files": []
   }
 }
 ```
@@ -126,11 +125,10 @@ generate various related files (e.g. `ui_java_resources_R.txt`):
 ```sh
 python ../../build/android/gyp/process_resources.py \
     --depfile gen/ui/android/ui_java_resources_1.d \
-    --android-sdk-jar ../../third_party/android_sdk/public/platforms/android-28/android.jar \
-    --aapt-path ../../third_party/android_sdk/public/build-tools/27.0.3/aapt \
+    --android-sdk-jar ../../third_party/android_sdk/public/platforms/android-29/android.jar \
+    --aapt-path ../../third_party/android_sdk/public/build-tools/29.0.2/aapt \
     --dependencies-res-zips=@FileArg\(gen/ui/android/ui_java_resources.build_config:resources:dependency_zips\) \
     --extra-res-packages=@FileArg\(gen/ui/android/ui_java_resources.build_config:resources:extra_package_names\) \
-    --extra-r-text-files=@FileArg\(gen/ui/android/ui_java_resources.build_config:resources:extra_r_text_files\) \
     --resource-dirs=\[\"../../ui/android/java/res\"\] \
     --debuggable \
     --resource-zip-out resource_zips/ui/android/ui_java_resources.resources.zip \

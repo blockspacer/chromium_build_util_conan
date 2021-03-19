@@ -46,6 +46,8 @@ def _CreateSymbolsDir(build_path, dynamic_library_names):
         build_path,
         '--binary',
         unstripped_library_path,
+        '--platform',
+        'android',
     ]
     return_code = subprocess.call(cmd)
     if return_code != 0:
@@ -117,8 +119,7 @@ def main():
       description='Fetches Crashpad dumps from a given device, '
       'walks and symbolizes the stacks.')
   parser.add_argument('--device', required=True, help='Device serial number')
-  parser.add_argument(
-      '--adb-path', required=True, help='Path to the "adb" command')
+  parser.add_argument('--adb-path', help='Path to the "adb" command')
   parser.add_argument(
       '--build-path',
       required=True,
@@ -135,7 +136,8 @@ def main():
     logging.error('Missing minidump_stackwalk executable')
     return 1
 
-  devil_chromium.Initialize(adb_path=args.adb_path)
+  devil_chromium.Initialize(output_directory=args.build_path,
+                            adb_path=args.adb_path)
   device = device_utils.DeviceUtils(args.device)
 
   device_crashpad_path = posixpath.join(args.chrome_cache_path, 'Crashpad',

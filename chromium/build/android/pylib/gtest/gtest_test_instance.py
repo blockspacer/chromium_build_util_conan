@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import HTMLParser
+import json
 import logging
 import os
 import re
@@ -23,18 +24,25 @@ with host_paths.SysPath(host_paths.BUILD_COMMON_PATH):
 
 
 BROWSER_TEST_SUITES = [
-  'components_browsertests',
-  'content_browsertests',
+    'android_browsertests',
+    'android_sync_integration_tests',
+    'components_browsertests',
+    'content_browsertests',
+    'weblayer_browsertests',
 ]
 
+# The max number of tests to run on a shard during the test run.
+MAX_SHARDS = 256
+
 RUN_IN_SUB_THREAD_TEST_SUITES = [
-  # Multiprocess tests should be run outside of the main thread.
-  'base_unittests',  # file_locking_unittest.cc uses a child process.
-  'ipc_perftests',
-  'ipc_tests',
-  'mojo_perftests',
-  'mojo_unittests',
-  'net_unittests'
+    # Multiprocess tests should be run outside of the main thread.
+    'base_unittests',  # file_locking_unittest.cc uses a child process.
+    'gwp_asan_unittests',
+    'ipc_perftests',
+    'ipc_tests',
+    'mojo_perftests',
+    'mojo_unittests',
+    'net_unittests'
 ]
 
 
@@ -76,8 +84,20 @@ _EXTRA_SHARD_SIZE_LIMIT = (
 # TODO(jbudorick): Remove these once we're no longer parsing stdout to generate
 # results.
 _RE_TEST_STATUS = re.compile(
-    r'\[ +((?:RUN)|(?:FAILED)|(?:OK)|(?:CRASHED)) +\]'
-    r' ?([^ ]+)?(?: \((\d+) ms\))?$')
+    # Test state.
+    r'\[ +((?:RUN)|(?:FAILED)|(?:OK)|(?:CRASHED)|(?:SKIPPED)) +\] ?'
+    # Test name.
+    r'([^ ]+)?'
+    # Optional parameters.
+    r'(?:, where'
+    #   Type parameter
+    r'(?: TypeParam = [^()]*(?: and)?)?'
+    #   Value parameter
+    r'(?: GetParam\(\) = [^()]*)?'
+    # End of optional parameters.
+    ')?'
+    # Optional test execution time.
+    r'(?: \((\d+) ms\))?$')
 # Crash detection constants.
 _RE_TEST_ERROR = re.compile(r'FAILURES!!! Tests run: \d+,'
                                     r' Failures: \d+, Errors: 1')
@@ -171,6 +191,8 @@ def ParseGTestOutput(output, symbolizer, device_abi):
         result_type = None
       elif matcher.group(1) == 'OK':
         result_type = base_test_result.ResultType.PASS
+      elif matcher.group(1) == 'SKIPPED':
+        result_type = base_test_result.ResultType.SKIP
       elif matcher.group(1) == 'FAILED':
         result_type = base_test_result.ResultType.FAIL
       elif matcher.group(1) == 'CRASHED':
@@ -235,6 +257,29 @@ def ParseGTestXML(xml_content):
   return results
 
 
+def ParseGTestJSON(json_content):
+  """Parse results in the JSON Test Results format."""
+  results = []
+  if not json_content:
+    return results
+
+  json_data = json.loads(json_content)
+
+  openstack = json_data['tests'].items()
+
+  while openstack:
+    name, value = openstack.pop()
+
+    if 'expected' in value and 'actual' in value:
+      result_type = base_test_result.ResultType.PASS if value[
+          'actual'] == 'PASS' else base_test_result.ResultType.FAIL
+      results.append(base_test_result.BaseTestResult(name, result_type))
+    else:
+      openstack += [("%s.%s" % (name, k), v) for k, v in value.iteritems()]
+
+  return results
+
+
 def TestNameWithoutDisabledPrefix(test_name):
   """Modify the test name without disabled prefix if prefix 'DISABLED_' or
   'FLAKY_' presents.
@@ -256,13 +301,16 @@ class GtestTestInstance(test_instance.TestInstance):
     # TODO(jbudorick): Support multiple test suites.
     if len(args.suite_name) > 1:
       raise ValueError('Platform mode currently supports only 1 gtest suite')
-    self._isolated_script_test_perf_output = (
-        args.isolated_script_test_perf_output)
+    self._coverage_dir = args.coverage_dir
     self._exe_dist_dir = None
     self._external_shard_index = args.test_launcher_shard_index
     self._extract_test_list_from_filter = args.extract_test_list_from_filter
     self._filter_tests_lock = threading.Lock()
     self._gs_test_artifacts_bucket = args.gs_test_artifacts_bucket
+    self._isolated_script_test_output = args.isolated_script_test_output
+    self._isolated_script_test_perf_output = (
+        args.isolated_script_test_perf_output)
+    self._render_test_output_dir = args.render_test_output_dir
     self._shard_timeout = args.shard_timeout
     self._store_tombstones = args.store_tombstones
     self._suite = args.suite_name[0]
@@ -284,6 +332,11 @@ class GtestTestInstance(test_instance.TestInstance):
     incremental_part = ''
     if args.test_apk_incremental_install_json:
       incremental_part = '_incremental'
+
+    self._test_launcher_batch_limit = MAX_SHARDS
+    if (args.test_launcher_batch_limit
+        and 0 < args.test_launcher_batch_limit < MAX_SHARDS):
+      self._test_launcher_batch_limit = args.test_launcher_batch_limit
 
     apk_path = os.path.join(
         constants.GetOutDirectory(), '%s_apk' % self._suite,
@@ -367,6 +420,10 @@ class GtestTestInstance(test_instance.TestInstance):
     return self._app_data_files
 
   @property
+  def coverage_dir(self):
+    return self._coverage_dir
+
+  @property
   def enable_xml_result_parsing(self):
     return self._enable_xml_result_parsing
 
@@ -399,8 +456,16 @@ class GtestTestInstance(test_instance.TestInstance):
     return self._gtest_filter
 
   @property
+  def isolated_script_test_output(self):
+    return self._isolated_script_test_output
+
+  @property
   def isolated_script_test_perf_output(self):
     return self._isolated_script_test_perf_output
+
+  @property
+  def render_test_output_dir(self):
+    return self._render_test_output_dir
 
   @property
   def package(self):
@@ -433,6 +498,10 @@ class GtestTestInstance(test_instance.TestInstance):
   @property
   def test_apk_incremental_install_json(self):
     return self._test_apk_incremental_install_json
+
+  @property
+  def test_launcher_batch_limit(self):
+    return self._test_launcher_batch_limit
 
   @property
   def total_external_shards(self):

@@ -4,6 +4,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+from __future__ import print_function
+
 import argparse
 import collections
 import contextlib
@@ -129,7 +131,7 @@ def logs_cell(result, test_name, suite_name):
 def code_search(test, cs_base_url):
   """Returns URL for test on codesearch."""
   search = test.replace('#', '.')
-  return '%s/?q=%s&type=cs' % (cs_base_url, search)
+  return '%s/search/?q=%s&type=cs' % (cs_base_url, search)
 
 
 def status_class(status):
@@ -463,8 +465,8 @@ def main():
 
   if len(args.positional) == 0 and args.json_file is None:
     if args.output_json:
-        with open(args.output_json, 'w') as f:
-          json.dump({}, f)
+      with open(args.output_json, 'w') as f:
+        json.dump({}, f)
     return
   elif len(args.positional) != 0 and args.json_file:
     raise parser.error('Exactly one of args.positional and '
@@ -533,10 +535,10 @@ def main():
       with open(args.output_json, 'w') as f:
         json.dump(json_object, f)
   else:
-    print 'Result Details: %s' % result_details_link
+    print('Result Details: %s' % result_details_link)
 
     if ui_screenshot_set_link:
-      print 'UI Screenshots %s' % ui_screenshot_link
+      print('UI Screenshots %s' % ui_screenshot_link)
 
 
 if __name__ == '__main__':

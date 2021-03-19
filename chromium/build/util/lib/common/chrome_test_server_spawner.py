@@ -25,9 +25,6 @@ import urlparse
 SERVER_TYPES = {
     'http': '',
     'ftp': '-f',
-    'sync': '',  # Sync uses its own script, and doesn't take a server type arg.
-    'tcpecho': '--tcp-echo',
-    'udpecho': '--udp-echo',
     'ws': '--websocket',
 }
 
@@ -41,13 +38,10 @@ _logger = logging.getLogger(__name__)
 
 
 # Path that are needed to import necessary modules when launching a testserver.
-os.environ['PYTHONPATH'] = os.environ.get('PYTHONPATH', '') + (':%s:%s:%s:%s:%s'
+os.environ['PYTHONPATH'] = os.environ.get('PYTHONPATH', '') + (':%s:%s:%s'
     % (os.path.join(_DIR_SOURCE_ROOT, 'third_party'),
        os.path.join(_DIR_SOURCE_ROOT, 'third_party', 'tlslite'),
-       os.path.join(_DIR_SOURCE_ROOT, 'third_party', 'pyftpdlib', 'src'),
-       os.path.join(_DIR_SOURCE_ROOT, 'net', 'tools', 'testserver'),
-       os.path.join(_DIR_SOURCE_ROOT, 'components', 'sync', 'tools',
-                    'testserver')))
+       os.path.join(_DIR_SOURCE_ROOT, 'net', 'tools', 'testserver')))
 
 
 # The timeout (in seconds) of starting up the Python test server.
@@ -65,9 +59,6 @@ def _GetServerTypeCommandLine(server_type):
   """
   if server_type not in SERVER_TYPES:
     raise NotImplementedError('Unknown server type: %s' % server_type)
-  if server_type == 'udpecho':
-    raise Exception('Please do not run UDP echo tests because we do not have '
-                    'a UDP forwarder tool.')
   return SERVER_TYPES[server_type]
 
 
@@ -230,14 +221,9 @@ class TestServerThread(threading.Thread):
     _logger.info('Start running the thread!')
     self.wait_event.clear()
     self._GenerateCommandLineArguments()
-    command = _DIR_SOURCE_ROOT
-    if self.arguments['server-type'] == 'sync':
-      command = [os.path.join(command, 'components', 'sync', 'tools',
-                              'testserver',
-                              'sync_testserver.py')] + self.command_line
-    else:
-      command = [os.path.join(command, 'net', 'tools', 'testserver',
-                              'testserver.py')] + self.command_line
+    command = [sys.executable,
+               os.path.join(_DIR_SOURCE_ROOT, 'net', 'tools', 'testserver',
+                            'testserver.py')] + self.command_line
     _logger.info('Running: %s', command)
 
     # Disable PYTHONUNBUFFERED because it has a bad interaction with the
@@ -279,6 +265,10 @@ class TestServerThread(threading.Thread):
     self.stop_event.wait()
     if self.process.poll() is None:
       self.process.kill()
+      # Wait for process to actually terminate.
+      # (crbug.com/946475)
+      self.process.wait()
+
     self.port_forwarder.Unmap(self.forwarder_device_port)
     self.process = None
     self.is_ready = False
@@ -364,7 +354,7 @@ class SpawningServerRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       _logger.info('Test server is running on port %d forwarded to %d.' %
               (new_server.forwarder_device_port, new_server.host_port))
       port = new_server.forwarder_device_port
-      assert not self.server.test_servers.has_key(port)
+      assert port not in self.server.test_servers
       self.server.test_servers[port] = new_server
     else:
       new_server.Stop()
@@ -375,13 +365,13 @@ class SpawningServerRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     """Stops the test server instance."""
     try:
       port = int(params['port'][0])
-    except ValueError, KeyError:
+    except ValueError:
       port = None
     if port == None or port <= 0:
       self._SendResponse(400, 'Invalid request.', {}, 'port must be specified')
       return
 
-    if not self.server.test_servers.has_key(port):
+    if port not in self.server.test_servers:
       self._SendResponse(400, 'Invalid request.', {},
                          "testserver isn't running on port %d" % port)
       return
@@ -396,8 +386,11 @@ class SpawningServerRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       self._SendResponse(200, 'OK', {}, 'killed')
       _logger.info('Test server on port %d is killed', port)
     else:
-      self._SendResponse(500, 'Test Server Error.', {}, '')
-      _logger.info('Encounter problem during killing a test server.')
+      # We expect the port to be free, but nothing stops the system from
+      # binding something else to that port, so don't throw error.
+      # (crbug.com/946475)
+      self._SendResponse(200, 'OK', {}, '')
+      _logger.warn('Port %s is not free after killing test server.' % port)
 
   def log_message(self, format, *args):
     # Suppress the default HTTP logging behavior if the logging level is higher

@@ -20,7 +20,7 @@ format. The first table contains function addresses and an index into the
 UNW_DATA table. The second table contains one or more rows for the function
 unwind information.
 
-The output file starts with 4 bytes counting the size of UNW_INDEX in bytes.
+The output file starts with 4 bytes counting the number of entries in UNW_INDEX.
 Then UNW_INDEX table and UNW_DATA table.
 
 UNW_INDEX contains two columns of N rows each, where N is the number of
@@ -240,7 +240,7 @@ def _WriteCfiData(cfi_data, out_file):
   func_addr_to_index[previous_func_end + 2] = _CANT_UNWIND
 
   # Write the size of UNW_INDEX file in bytes.
-  _Write4Bytes(out_file, len(func_addr_to_index) * 6)
+  _Write4Bytes(out_file, len(func_addr_to_index))
 
   # Write the UNW_INDEX table. First list of addresses and then indices.
   sorted_unw_index = sorted(func_addr_to_index.iteritems())
@@ -254,10 +254,8 @@ def _WriteCfiData(cfi_data, out_file):
     _Write2Bytes(out_file, data)
 
 
-def _ParseCfiData(sym_file, output_path):
-  with open(sym_file, 'r') as f:
-    cfi_data =  _GetAllCfiRows(f)
-
+def _ParseCfiData(sym_stream, output_path):
+  cfi_data = _GetAllCfiRows(sym_stream)
   with open(output_path, 'wb') as out_file:
     _WriteCfiData(cfi_data, out_file)
 
@@ -275,13 +273,11 @@ def main():
       help='The path of the dump_syms binary')
 
   args = parser.parse_args()
+  cmd = ['./' + args.dump_syms_path, args.input_path]
+  proc = subprocess.Popen(cmd, bufsize=-1, stdout=subprocess.PIPE)
+  _ParseCfiData(proc.stdout, args.output_path)
+  assert proc.wait() == 0
 
-  with tempfile.NamedTemporaryFile() as sym_file:
-    out = subprocess.call(
-        ['./' +args.dump_syms_path, args.input_path], stdout=sym_file)
-    assert not out
-    sym_file.flush()
-    _ParseCfiData(sym_file.name, args.output_path)
   return 0
 
 if __name__ == '__main__':

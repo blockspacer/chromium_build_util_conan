@@ -7,6 +7,8 @@
 UploadSysroot for each supported arch of each sysroot creator.
 """
 
+from __future__ import print_function
+
 import glob
 import hashlib
 import json
@@ -69,8 +71,6 @@ def build_and_upload(script_path, distro, release, arch, lock):
 
 def main():
   script_dir = os.path.dirname(os.path.realpath(__file__))
-  subprocess.check_call(
-      [os.path.join(script_dir, 'update-archive-timestamp.sh')])
   procs = []
   lock = multiprocessing.Lock()
   for filename in glob.glob(os.path.join(script_dir, 'sysroot-creator-*.sh')):
@@ -87,13 +87,13 @@ def main():
   for _, proc in procs:
     proc.join()
 
-  print "SYSROOT CREATION SUMMARY"
+  print("SYSROOT CREATION SUMMARY")
   failures = 0
   for name, proc in procs:
     if proc.exitcode:
       failures += 1
     status = "FAILURE" if proc.exitcode else "SUCCESS"
-    print "%s sysroot creation\t%s" % (name, status)
+    print("%s sysroot creation\t%s" % (name, status))
   return failures
 
 

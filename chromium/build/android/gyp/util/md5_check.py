@@ -12,6 +12,10 @@ import os
 import sys
 import zipfile
 
+from util import build_utils
+
+sys.path.insert(1, os.path.join(build_utils.DIR_SOURCE_ROOT, 'build'))
+import print_python_deps
 
 # When set and a difference is detected, a diff of what changed is printed.
 PRINT_EXPLANATIONS = int(os.environ.get('PRINT_BUILD_EXPLANATIONS', 0))
@@ -20,9 +24,60 @@ PRINT_EXPLANATIONS = int(os.environ.get('PRINT_BUILD_EXPLANATIONS', 0))
 _FORCE_REBUILD = int(os.environ.get('FORCE_REBUILD', 0))
 
 
-def CallAndRecordIfStale(
-    function, record_path=None, input_paths=None, input_strings=None,
-    output_paths=None, force=False, pass_changes=False):
+def CallAndWriteDepfileIfStale(on_stale_md5,
+                               options,
+                               record_path=None,
+                               input_paths=None,
+                               input_strings=None,
+                               output_paths=None,
+                               force=False,
+                               pass_changes=False,
+                               track_subpaths_allowlist=None,
+                               depfile_deps=None):
+  """Wraps CallAndRecordIfStale() and writes a depfile if applicable.
+
+  Depfiles are automatically added to output_paths when present in the |options|
+  argument. They are then created after |on_stale_md5| is called.
+
+  By default, only python dependencies are added to the depfile. If there are
+  other input paths that are not captured by GN deps, then they should be listed
+  in depfile_deps. It's important to write paths to the depfile that are already
+  captured by GN deps since GN args can cause GN deps to change, and such
+  changes are not immediately reflected in depfiles (http://crbug.com/589311).
+  """
+  if not output_paths:
+    raise Exception('At least one output_path must be specified.')
+  input_paths = list(input_paths or [])
+  input_strings = list(input_strings or [])
+  output_paths = list(output_paths or [])
+
+  input_paths += print_python_deps.ComputePythonDependencies()
+
+  CallAndRecordIfStale(
+      on_stale_md5,
+      record_path=record_path,
+      input_paths=input_paths,
+      input_strings=input_strings,
+      output_paths=output_paths,
+      force=force,
+      pass_changes=pass_changes,
+      track_subpaths_allowlist=track_subpaths_allowlist)
+
+  # Write depfile even when inputs have not changed to ensure build correctness
+  # on bots that build with & without patch, and the patch changes the depfile
+  # location.
+  if hasattr(options, 'depfile') and options.depfile:
+    build_utils.WriteDepfile(options.depfile, output_paths[0], depfile_deps)
+
+
+def CallAndRecordIfStale(function,
+                         record_path=None,
+                         input_paths=None,
+                         input_strings=None,
+                         output_paths=None,
+                         force=False,
+                         pass_changes=False,
+                         track_subpaths_allowlist=None):
   """Calls function if outputs are stale.
 
   Outputs are considered stale if:
@@ -43,6 +98,8 @@ def CallAndRecordIfStale(
     force: Whether to treat outputs as missing regardless of whether they
       actually are.
     pass_changes: Whether to pass a Changes instance to |function|.
+    track_subpaths_allowlist: Relevant only when pass_changes=True. List of .zip
+      files from |input_paths| to make subpath information available for.
   """
   assert record_path or output_paths
   input_paths = input_paths or []
@@ -57,25 +114,34 @@ def CallAndRecordIfStale(
   new_metadata = _Metadata(track_entries=pass_changes or PRINT_EXPLANATIONS)
   new_metadata.AddStrings(input_strings)
 
+  zip_allowlist = set(track_subpaths_allowlist or [])
   for path in input_paths:
-    if _IsZipFile(path):
+    # It's faster to md5 an entire zip file than it is to just locate & hash
+    # its central directory (which is what this used to do).
+    if path in zip_allowlist:
       entries = _ExtractZipEntries(path)
       new_metadata.AddZipFile(path, entries)
     else:
-      new_metadata.AddFile(path, _Md5ForPath(path))
+      new_metadata.AddFile(path, _ComputeTagForPath(path))
 
   old_metadata = None
   force = force or _FORCE_REBUILD
   missing_outputs = [x for x in output_paths if force or not os.path.exists(x)]
+  too_new = []
   # When outputs are missing, don't bother gathering change information.
   if not missing_outputs and os.path.exists(record_path):
-    with open(record_path, 'r') as jsonfile:
-      try:
-        old_metadata = _Metadata.FromFile(jsonfile)
-      except:  # pylint: disable=bare-except
-        pass  # Not yet using new file format.
+    record_mtime = os.path.getmtime(record_path)
+    # Outputs newer than the change information must have been modified outside
+    # of the build, and should be considered stale.
+    too_new = [x for x in output_paths if os.path.getmtime(x) > record_mtime]
+    if not too_new:
+      with open(record_path, 'r') as jsonfile:
+        try:
+          old_metadata = _Metadata.FromFile(jsonfile)
+        except:  # pylint: disable=bare-except
+          pass  # Not yet using new file format.
 
-  changes = Changes(old_metadata, new_metadata, force, missing_outputs)
+  changes = Changes(old_metadata, new_metadata, force, missing_outputs, too_new)
   if not changes.HasChanges():
     return
 
@@ -95,30 +161,33 @@ def CallAndRecordIfStale(
 class Changes(object):
   """Provides and API for querying what changed between runs."""
 
-  def __init__(self, old_metadata, new_metadata, force, missing_outputs):
+  def __init__(self, old_metadata, new_metadata, force, missing_outputs,
+               too_new):
     self.old_metadata = old_metadata
     self.new_metadata = new_metadata
     self.force = force
     self.missing_outputs = missing_outputs
+    self.too_new = too_new
 
   def _GetOldTag(self, path, subpath=None):
     return self.old_metadata and self.old_metadata.GetTag(path, subpath)
 
   def HasChanges(self):
     """Returns whether any changes exist."""
-    return (self.force or
-            not self.old_metadata or
-            self.old_metadata.StringsMd5() != self.new_metadata.StringsMd5() or
-            self.old_metadata.FilesMd5() != self.new_metadata.FilesMd5())
+    return (self.HasStringChanges()
+            or self.old_metadata.FilesMd5() != self.new_metadata.FilesMd5())
+
+  def HasStringChanges(self):
+    """Returns whether string metadata changed."""
+    return (self.force or not self.old_metadata
+            or self.old_metadata.StringsMd5() != self.new_metadata.StringsMd5())
 
   def AddedOrModifiedOnly(self):
     """Returns whether the only changes were from added or modified (sub)files.
 
     No missing outputs, no removed paths/subpaths.
     """
-    if (self.force or
-        not self.old_metadata or
-        self.old_metadata.StringsMd5() != self.new_metadata.StringsMd5()):
+    if self.HasStringChanges():
       return False
     if any(self.IterRemovedPaths()):
       return False
@@ -195,6 +264,8 @@ class Changes(object):
       return 'force=True'
     elif self.missing_outputs:
       return 'Outputs do not exist:\n  ' + '\n  '.join(self.missing_outputs)
+    elif self.too_new:
+      return 'Outputs newer than stamp file:\n  ' + '\n  '.join(self.too_new)
     elif self.old_metadata is None:
       return 'Previous stamp file not found.'
 
@@ -368,27 +439,15 @@ class _Metadata(object):
     return (entry['path'] for entry in subentries)
 
 
-def _UpdateMd5ForFile(md5, path, block_size=2**16):
-  with open(path, 'rb') as infile:
-    while True:
-      data = infile.read(block_size)
-      if not data:
-        break
-      md5.update(data)
-
-
-def _UpdateMd5ForDirectory(md5, dir_path):
-  for root, _, files in os.walk(dir_path):
-    for f in files:
-      _UpdateMd5ForFile(md5, os.path.join(root, f))
-
-
-def _Md5ForPath(path):
+def _ComputeTagForPath(path):
+  stat = os.stat(path)
+  if stat.st_size > 1 * 1024 * 1024:
+    # Fallback to mtime for large files so that md5_check does not take too long
+    # to run.
+    return stat.st_mtime
   md5 = hashlib.md5()
-  if os.path.isdir(path):
-    _UpdateMd5ForDirectory(md5, path)
-  else:
-    _UpdateMd5ForFile(md5, path)
+  with open(path, 'rb') as f:
+    md5.update(f.read())
   return md5.hexdigest()
 
 
@@ -396,16 +455,8 @@ def _ComputeInlineMd5(iterable):
   """Computes the md5 of the concatenated parameters."""
   md5 = hashlib.md5()
   for item in iterable:
-    md5.update(str(item))
+    md5.update(str(item).encode('ascii'))
   return md5.hexdigest()
-
-
-def _IsZipFile(path):
-  """Returns whether to treat the given file as a zip file."""
-  # ijar doesn't set the CRC32 field.
-  if path.endswith('.interface.jar'):
-    return False
-  return path[-4:] in ('.zip', '.apk', '.jar') or path.endswith('.srcjar')
 
 
 def _ExtractZipEntries(path):

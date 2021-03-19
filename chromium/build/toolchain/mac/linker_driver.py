@@ -10,7 +10,14 @@ import shutil
 import subprocess
 import sys
 
+# On mac, the values of these globals are modified when parsing -Wcrl, flags. On
+# ios, the script uses the defaults.
 DSYMUTIL_INVOKE = ['xcrun', 'dsymutil']
+STRIP_INVOKE = ['xcrun', 'strip']
+
+# Setting this flag will emit a deterministic binary by stripping dates from the
+# N_OSO field.
+DETERMINISTIC_FLAG = '--deterministic'
 
 # The linker_driver.py is responsible for forwarding a linker invocation to
 # the compiler driver, while processing special arguments itself.
@@ -45,6 +52,10 @@ DSYMUTIL_INVOKE = ['xcrun', 'dsymutil']
 #       After invoking the linker, and optionally dsymutil, this will run
 #       the strip command on the linker's output. strip_arguments are
 #       comma-separated arguments to be passed to the strip command.
+#
+#   -Wcrl,strippath,<strip_path>
+#       Sets the path to the strip to run with -Wcrl,strip, in which case
+#       `xcrun` is not used to invoke it.
 
 def Main(args):
   """Main function for the linker driver. Separates out the arguments for
@@ -58,31 +69,32 @@ def Main(args):
   if len(args) < 2:
     raise RuntimeError("Usage: linker_driver.py [linker-invocation]")
 
-  for i in xrange(len(args)):
-    if args[i] != '--developer_dir':
-      continue
-    os.environ['DEVELOPER_DIR'] = args[i + 1]
-    del args[i:i+2]
-    break
-
   # Collect arguments to the linker driver (this script) and remove them from
   # the arguments being passed to the compiler driver.
   linker_driver_actions = {}
   compiler_driver_args = []
+  deterministic = False
   for arg in args[1:]:
     if arg.startswith(_LINKER_DRIVER_ARG_PREFIX):
       # Convert driver actions into a map of name => lambda to invoke.
       driver_action = ProcessLinkerDriverArg(arg)
       assert driver_action[0] not in linker_driver_actions
       linker_driver_actions[driver_action[0]] = driver_action[1]
+    elif arg == DETERMINISTIC_FLAG:
+      deterministic = True
     else:
       compiler_driver_args.append(arg)
 
   linker_driver_outputs = [_FindLinkerOutput(compiler_driver_args)]
 
   try:
+    # Zero the mtime in OSO fields for deterministic builds.
+    # https://crbug.com/330262.
+    env = os.environ.copy()
+    if deterministic:
+      env['ZERO_AR_DATE'] = '1'
     # Run the linker by invoking the compiler driver.
-    subprocess.check_call(compiler_driver_args)
+    subprocess.check_call(compiler_driver_args, env=env)
 
     # Run the linker driver actions, in the order specified by the actions list.
     for action in _LINKER_DRIVER_ACTIONS:
@@ -148,7 +160,14 @@ def RunDsymUtil(dsym_path_prefix, full_args):
 
   # Remove old dSYMs before invoking dsymutil.
   _RemovePath(dsym_out)
-  subprocess.check_call(DSYMUTIL_INVOKE + ['-o', dsym_out, linker_out])
+
+  tools_paths = _FindToolsPaths(full_args)
+  if os.environ.get('PATH'):
+    tools_paths.append(os.environ['PATH'])
+  dsymutil_env = os.environ.copy()
+  dsymutil_env['PATH'] = ':'.join(tools_paths)
+  subprocess.check_call(DSYMUTIL_INVOKE + ['-o', dsym_out, linker_out],
+                        env=dsymutil_env)
   return [dsym_out]
 
 
@@ -204,11 +223,30 @@ def RunStrip(strip_args_string, full_args):
   Returns:
       list of string, Build step outputs.
   """
-  strip_command = ['xcrun', 'strip']
+  strip_command = list(STRIP_INVOKE)
   if len(strip_args_string) > 0:
     strip_command += strip_args_string.split(',')
   strip_command.append(_FindLinkerOutput(full_args))
   subprocess.check_call(strip_command)
+  return []
+
+
+def SetStripPath(strip_path, full_args):
+  """Linker driver action for -Wcrl,strippath,<strip_path>.
+
+  Sets the invocation command for strip, which allows the caller to specify
+  an alternate strip. This action is always processed before the RunStrip
+  action.
+
+  Args:
+    strip_path: string, The path to the strip binary to run
+    full_args: list of string, Full argument list for the linker driver.
+
+  Returns:
+    No output - this step is run purely for its side-effect.
+  """
+  global STRIP_INVOKE
+  STRIP_INVOKE = [strip_path]
   return []
 
 
@@ -226,6 +264,19 @@ def _FindLinkerOutput(full_args):
   except ValueError:
     output_flag_index = full_args.index('-output')
   return full_args[output_flag_index + 1]
+
+
+def _FindToolsPaths(full_args):
+  """Finds all paths where the script should look for additional tools."""
+  paths = []
+  for idx, arg in enumerate(full_args):
+    if arg in ['-B', '--prefix']:
+      paths.append(full_args[idx + 1])
+    elif arg.startswith('-B'):
+      paths.append(arg[2:])
+    elif arg.startswith('--prefix='):
+      paths.append(arg[9:])
+  return paths
 
 
 def _RemovePath(path):
@@ -247,6 +298,7 @@ _LINKER_DRIVER_ACTIONS = [
     ('dsymutilpath,', SetDsymutilPath),
     ('dsym,', RunDsymUtil),
     ('unstripped,', RunSaveUnstripped),
+    ('strippath,', SetStripPath),
     ('strip,', RunStrip),
 ]
 

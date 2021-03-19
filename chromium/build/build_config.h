@@ -1,143 +1,40 @@
-﻿// Copyright (c) 2012 The Chromium Authors. All rights reserved.
+// Copyright (c) 2012 The Chromium Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // This file adds defines about the platform we're currently building on.
+//
 //  Operating System:
-//    OS_WIN / OS_MACOSX / OS_LINUX / OS_POSIX (MACOSX or LINUX) /
-//    OS_NACL (NACL_SFI or NACL_NONSFI) / OS_NACL_SFI / OS_NACL_NONSFI
-//    OS_CHROMEOS is set by the build system
+//    OS_AIX / OS_ANDROID / OS_ASMJS / OS_FREEBSD / OS_FUCHSIA / OS_IOS /
+//    OS_LINUX / OS_MAC / OS_NACL (SFI or NONSFI) / OS_NETBSD / OS_OPENBSD /
+//    OS_QNX / OS_SOLARIS / OS_WIN
+//  Operating System family:
+//    OS_APPLE: IOS or MAC
+//    OS_BSD: FREEBSD or NETBSD or OPENBSD
+//    OS_POSIX: AIX or ANDROID or ASMJS or CHROMEOS or FREEBSD or IOS or LINUX
+//              or MAC or NACL or NETBSD or OPENBSD or QNX or SOLARIS
+//
+//  /!\ Note: OS_CHROMEOS is set by the build system, not this file
+//
 //  Compiler:
 //    COMPILER_MSVC / COMPILER_GCC
+//
 //  Processor:
-//    ARCH_CPU_X86 / ARCH_CPU_X86_64 / ARCH_CPU_X86_FAMILY (X86 or X86_64)
-//    ARCH_CPU_32_BITS / ARCH_CPU_64_BITS
+//    ARCH_CPU_ARM64 / ARCH_CPU_ARMEL / ARCH_CPU_MIPS / ARCH_CPU_MIPS64 /
+//    ARCH_CPU_MIPS64EL / ARCH_CPU_MIPSEL / ARCH_CPU_PPC64 / ARCH_CPU_S390 /
+//    ARCH_CPU_S390X / ARCH_CPU_X86 / ARCH_CPU_X86_64
+//  Processor family:
+//    ARCH_CPU_ARM_FAMILY: ARMEL or ARM64
+//    ARCH_CPU_MIPS_FAMILY: MIPS64EL or MIPSEL or MIPS64 or MIPS
+//    ARCH_CPU_PPC64_FAMILY: PPC64
+//    ARCH_CPU_S390_FAMILY: S390 or S390X
+//    ARCH_CPU_X86_FAMILY: X86 or X86_64
+//  Processor features:
+//    ARCH_CPU_31_BITS / ARCH_CPU_32_BITS / ARCH_CPU_64_BITS
+//    ARCH_CPU_BIG_ENDIAN / ARCH_CPU_LITTLE_ENDIAN
 
 #ifndef BUILD_BUILD_CONFIG_H_
 #define BUILD_BUILD_CONFIG_H_
-
-// TODO
-#ifndef SK_CRASH
-#define SK_CRASH() \
-  printf("called SK_CRASH");
-#endif
-
-// TODO: remove custom debug messages than wasm port will be finalized
-#if defined(PORT_OWN_DLOG)
-#define P_LOG(...) \
-  printf("This message is in %s on line %d\n",  __FILE__, __LINE__); \
-  printf((__VA_ARGS__));
-#else
-#define P_LOG(...) \
-  (void)(0);
-#endif
-
-// TODO: move wasm helpers to separate file
-// (also than can use OS_EMSCRIPTEN)
-#if defined(__EMSCRIPTEN__)
-
-/// \note rquires "emscripten/emscripten.h"
-/// \note The stack trace is not available at least on IE10 and Safari 6.
-/// \note build with -s DEMANGLE_SUPPORT=1 and -O1
-/// \note stackTrace() tries to demangle C++ function names
-/// \see https://emscripten.org/docs/porting/Debugging.html#manual-print-debugging
-/// \see emscripten_get_callstack, stackTrace, emscripten_run_script_string, EM_ASM
-/// \see https://github.com/lolengine/lol/blob/master/src/base/assert.cpp#L32
-/// \see http://webassemblycode.com/using-browsers-debug-webassembly/
-#define HTML5_STACKTRACE() \
-  printf("This message is in %s:%d:%s\n",  __FILE__, __LINE__, __func__); \
-  printf("Callstack:\n%s", emscripten_run_script_string("stackTrace();"));
-
-#define HTML5_STACKTRACE_IF(x) \
-  if ((x)) { \
-    HTML5_STACKTRACE(); \
-  }
-
-#define HTML5_STACKTRACE_WRAP() \
-  []() { \
-    HTML5_STACKTRACE(); \
-    return ""; \
-  }()
-
-#define EM_IS_MAIN_THREAD() \
-  (emscripten_has_threading_support() ? emscripten_is_main_runtime_thread() : true)
-
-/// \note printing to console or emscripten terminal area may
-/// decrease performance drastically
-/// \note Webassembly worker thread may hang if printf is used in threads
-/// \see https://github.com/emscripten-core/emscripten/issues/8325
-#define EM_LOG(arg) \
-  EM_ASM(console.log('EM_LOG: ' + UTF8ToString($0)), arg);
-
-#define EM_ERR(arg) \
-  EM_ASM(console.error('EM_LOG: ' + UTF8ToString($0)), arg);
-
-#define EM_LOG_NUM(arg) \
-  EM_ASM(console.log('EM_LOG: ' + $0), arg);
-
-#define EM_ERR_NUM(arg) \
-  EM_ASM(console.error('EM_LOG: ' + $0), arg);
-
-/// \note use emscripten_async* to prevent blocking of browser event loop
-/// \note emscripten_async* may be delayed too much, use it only with async logic
-#define emscripten_async_call_closure(closureArg) \
-{ \
-  base::STClosure* stClosure = new base::STClosure(std::move( \
-        (closureArg) \
-      )); \
-  void* dataIn = reinterpret_cast<void*>(stClosure); \
-  DCHECK(dataIn); \
-  emscripten_async_call([](void* data) { \
-      DCHECK(data); \
-      base::STClosure* stClosureData = reinterpret_cast<base::STClosure*>(data); \
-      std::move(stClosureData->onceClosure_).Run(); \
-      delete stClosureData; \
-  }, dataIn, 10); \
-}
-
-// wraps std::function into async call (emscripten only)
-// see https://github.com/chadaustin/Web-Benchmarks/blob/master/embind_calls/bench.cpp#L90
-#define DECLARE_HTML5_YIELD_HELPER() \
-static void emscripten_yield_call(std::function<void()> f, const int ms = 500) { \
-    P_LOG("emscripten_yield_call waitable\n"); \
-    auto p = new std::function<void()>(f); \
-    emscripten_async_call([](void* p) { \
-        P_LOG("emscripten_async_call waitable\n"); \
-        auto q = reinterpret_cast<std::function<void()>*>(p); \
-        (*q)(); \
-        delete q; \
-    }, p, ms); \
-}
-
-#define HTML5_YIELD_HELPER_1(x) \
-  emscripten_yield_call((x));
-
-#define HTML5_YIELD_HELPER_2(x, y) \
-  emscripten_yield_call((x), (y));
-
-// see https://github.com/h-s-c/libKD/blob/master/source/kd_threads.c#L861
-// see https://emscripten.org/docs/api_reference/emscripten.h.html?highlight=emscripten_sleep#c.emscripten_sleep
-// emscripten_sleep - Sleep for ms milliseconds. blocks all other operations while it runs
-// emscripten_sleep_with_yield - If you do want things to happen while sleeping
-#ifdef HAS_ASYNC
-#define HTML5_ASYNC_SLEEP(x) \
-  printf("This message is in %s:%d:%s\n",  __FILE__, __LINE__, __func__); \
-  printf("called emscripten_sleep_with_yield(%lld)\n", (x)); \
-  emscripten_sleep_with_yield((x)); \
-  printf("finished emscripten_sleep_with_yield(%lld)\n", (x));
-#else
-#define HTML5_ASYNC_SLEEP(x) \
-  printf("This message is in %s on line %d\n",  __FILE__, __LINE__); \
-  printf("called emscripten_sleep_with_yield(%lld)\n", (x)); \
-  printf("emscripten_sleep_with_yield requires emterpreter or https://emscripten.org/docs/porting/asyncify.html"); \
-  HTML5_STACKTRACE(); \
-  printf("finished emscripten_sleep_with_yield(%lld)\n", (x));
-#endif
-
-#endif
-
-//#if defined(STARBOARD)
-//#define OS_STARBOARD 1
 
 // A set of macros to use for platform detection.
 #if defined(__native_client__)
@@ -156,26 +53,30 @@ static void emscripten_yield_call(std::function<void()> f, const int ms = 500) {
 #elif defined(ANDROID)
 #define OS_ANDROID 1
 #elif defined(__APPLE__)
-// only include TargetConditions after testing ANDROID as some android builds
-// on mac don't have this header available and it's not needed unless the target
-// is really mac/ios.
+// Only include TargetConditionals after testing ANDROID as some Android builds
+// on the Mac have this header available and it's not needed unless the target
+// is really an Apple platform.
 #include <TargetConditionals.h>
-#define OS_MACOSX 1
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 #define OS_IOS 1
+#else
+#define OS_MAC 1
 #endif  // defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 #elif defined(__linux__)
+#if !defined(OS_CHROMEOS)
+// Do not define OS_LINUX on Chrome OS build.
+// The OS_CHROMEOS macro is defined in GN.
 #define OS_LINUX 1
-// include a system header to pull in features.h for glibc/uclibc macros.
+#endif  // !defined(OS_CHROMEOS)
+// Include a system header to pull in features.h for glibc/uclibc macros.
 #include <unistd.h>
 #if defined(__GLIBC__) && !defined(__UCLIBC__)
-// we really are using glibc, not uClibc pretending to be glibc
+// We really are using glibc, not uClibc pretending to be glibc.
 #define LIBC_GLIBC 1
 #endif
 #elif defined(_WIN32) || defined(WIN32) || defined(_WIN64) || defined(WIN64)
 #define OS_WIN 1
-// custom
-#define OS_WINDOWS 1 // https://github.com/blockspacer/skia-opengl-emscripten/blob/7c423190544c8da1bf8ae79b800c9c0c83dd3c6e/src/chromium/base/third_party/symbolize/demangle.cc#L41
+#define OS_WINDOWS 1
 #elif defined(__Fuchsia__)
 #define OS_FUCHSIA 1
 #elif defined(__FreeBSD__)
@@ -188,27 +89,19 @@ static void emscripten_yield_call(std::function<void()> f, const int ms = 500) {
 #define OS_SOLARIS 1
 #elif defined(__QNXNTO__)
 #define OS_QNX 1
-// https://github.com/kwonoj/docker-pdfium-wasm/blob/master/patches/build_config.h.patch
-//
-// see https://github.com/google/xrtl/blob/master/xrtl/tools/target_platform/target_platform.h#L63
-#if defined(__wasm32__)
-#define ARCH_CPU_ARCH_WASM_32 1
-#elif defined(__wasm64__)
-#define ARCH_CPU_ARCH_WASM_64 1
-#elif defined(__asmjs__)
-#define ARCH_CPU_ARCH_ASMJS 1
-#endif  // wasm/asmjs
-//
-#define OS_ASMJS 1
 #elif defined(_AIX)
 #define OS_AIX 1
-#elif defined(__asmjs__)
-#define OS_ASMJS
+#elif defined(__asmjs__) || defined(__wasm__)
+#define OS_ASMJS 1
 #else
 #error Please add support for your platform in build/build_config.h
 #endif
 // NOTE: Adding a new port? Please follow
 // https://chromium.googlesource.com/chromium/src/+/master/docs/new_port_policy.md
+
+#if defined(OS_MAC) || defined(OS_IOS)
+#define OS_APPLE 1
+#endif
 
 // For access to standard BSD features, use OS_BSD instead of a
 // more specific macro.
@@ -218,20 +111,16 @@ static void emscripten_yield_call(std::function<void()> f, const int ms = 500) {
 
 // For access to standard POSIXish features, use OS_POSIX instead of a
 // more specific macro.
-#if defined(OS_AIX) || defined(OS_ANDROID) || defined(OS_ASMJS) ||    \
-    defined(OS_FREEBSD) || defined(OS_LINUX) || defined(OS_MACOSX) || \
-    defined(OS_NACL) || defined(OS_NETBSD) || defined(OS_OPENBSD) ||  \
-    defined(OS_QNX) || defined(OS_SOLARIS) || defined(OS_EMSCRIPTEN)
+#if defined(OS_AIX) || defined(OS_ANDROID) || defined(OS_ASMJS) ||  \
+    defined(OS_FREEBSD) || defined(OS_IOS) || defined(OS_LINUX) ||  \
+    defined(OS_CHROMEOS) || defined(OS_MAC) || defined(OS_NACL) ||  \
+    defined(OS_NETBSD) || defined(OS_OPENBSD) || defined(OS_QNX) || \
+    defined(OS_SOLARIS) || defined(OS_EMSCRIPTEN)
 #define OS_POSIX 1
 #endif
 
-// Use tcmalloc
-#if (defined(OS_WIN) || defined(OS_LINUX) || defined(OS_ANDROID)) && \
-    !defined(NO_TCMALLOC)
-#define USE_TCMALLOC 1
-#endif
-
-// Compiler detection.
+// Compiler detection. Note: clang masquerades as GCC on POSIX and as MSVC on
+// Windows.
 #if defined(__GNUC__)
 #define COMPILER_GCC 1
 #elif defined(_MSC_VER)
@@ -288,7 +177,7 @@ static void emscripten_yield_call(std::function<void()> f, const int ms = 500) {
 #define ARCH_CPU_ARM64 1
 #define ARCH_CPU_64_BITS 1
 #define ARCH_CPU_LITTLE_ENDIAN 1
-#elif defined(__pnacl__) || defined(__asmjs__)
+#elif defined(__pnacl__) || defined(__asmjs__) || defined(__wasm__)
 #define ARCH_CPU_32_BITS 1
 #define ARCH_CPU_LITTLE_ENDIAN 1
 #elif defined(__MIPSEL__)

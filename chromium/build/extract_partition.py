@@ -30,12 +30,13 @@ def main():
       required=True,
       help='Stripped output file',
       metavar='FILE')
+  parser.add_argument('--dwp', help='Path to dwp binary', metavar='FILE')
   parser.add_argument('input', help='Input file')
   args = parser.parse_args()
 
   objcopy_args = [args.objcopy]
   if args.partition:
-    objcopy_args += ['--extract-partition', args.extract_partition]
+    objcopy_args += ['--extract-partition', args.partition]
   else:
     objcopy_args += ['--extract-main-partition']
   objcopy_args += [args.input, args.unstripped_output]
@@ -45,6 +46,15 @@ def main():
       args.objcopy, '--strip-all', args.unstripped_output, args.stripped_output
   ]
   subprocess.check_call(objcopy_args)
+
+  if args.dwp:
+    dwp_args = [
+        args.dwp, '-e', args.unstripped_output, '-o',
+        args.unstripped_output + '.dwp'
+    ]
+    # Suppress output here because it doesn't seem to be useful. The most
+    # common error is a segfault, which will happen if files are missing.
+    subprocess.check_output(dwp_args, stderr=subprocess.STDOUT)
 
 
 if __name__ == '__main__':

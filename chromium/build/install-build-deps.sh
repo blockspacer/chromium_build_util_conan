@@ -5,7 +5,7 @@
 # found in the LICENSE file.
 
 # Script to install everything needed to build chromium (well, ideally, anyway)
-# See https://chromium.googlesource.com/chromium/src/+/master/docs/linux_build_instructions.md
+# See https://chromium.googlesource.com/chromium/src/+/master/docs/linux/build_instructions.md
 
 usage() {
   echo "Usage: $0 [--options]"
@@ -34,13 +34,14 @@ build_apt_package_list() {
   echo "Building apt package list." >&2
   apt-cache dumpavail | \
     python -c '\
+      from __future__ import print_function; \
       import re,sys; \
       o = sys.stdin.read(); \
       p = {"i386": ":i386"}; \
       f = re.M | re.S; \
       r = re.compile(r"^Package: (.+?)$.+?^Architecture: (.+?)$", f); \
       m = ["%s%s" % (x, p.get(y, "")) for x, y in re.findall(r, o)]; \
-      print "\n".join(m)'
+      print("\n".join(m))'
 }
 
 # Checks whether a particular package is available in the repos.
@@ -51,8 +52,8 @@ package_exists() {
     echo "Call build_apt_package_list() prior to calling package_exists()" >&2
     apt_package_list=$(build_apt_package_list)
   fi
-  # 'apt-cache search' takes a regex string, so eg. the +'s in packages like
-  # "libstdc++" need to be escaped.
+  # `grep` takes a regex string, so the +'s in package names, e.g. "libstdc++",
+  # need to be escaped.
   local escaped="$(echo $1 | sed 's/[\~\+\.\:-]/\\&/g')"
   [ ! -z "$(grep "^${escaped}$" <<< "${apt_package_list}")" ]
 }
@@ -96,12 +97,13 @@ fi
 # Check for lsb_release command in $PATH
 if ! which lsb_release > /dev/null; then
   echo "ERROR: lsb_release not found in \$PATH" >&2
+  echo "try: sudo apt-get install lsb-release" >&2
   exit 1;
 fi
 
 distro_codename=$(lsb_release --codename --short)
 distro_id=$(lsb_release --id --short)
-supported_codenames="(trusty|xenial|bionic|disco)"
+supported_codenames="(trusty|xenial|bionic|disco|eoan|focal|groovy)"
 supported_ids="(Debian)"
 if [ 0 -eq "${do_unsupported-0}" ] && [ 0 -eq "${do_quick_check-0}" ] ; then
   if [[ ! $distro_codename =~ $supported_codenames &&
@@ -110,7 +112,8 @@ if [ 0 -eq "${do_unsupported-0}" ] && [ 0 -eq "${do_quick_check-0}" ] ; then
       "\tUbuntu 14.04 LTS (trusty with EoL April 2022)\n" \
       "\tUbuntu 16.04 LTS (xenial with EoL April 2024)\n" \
       "\tUbuntu 18.04 LTS (bionic with EoL April 2028)\n" \
-      "\tUbuntu 19.04 (disco)\n" \
+      "\tUbuntu 20.04 LTS (focal with Eol April 2030)\n" \
+      "\tUbuntu 20.10 (groovy)\n" \
       "\tDebian 8 (jessie) or later" >&2
     exit 1
   fi
@@ -127,10 +130,12 @@ if [ "x$(id -u)" != x0 ] && [ 0 -eq "${do_quick_check-0}" ]; then
   echo
 fi
 
-if [ "$do_inst_lib32" = "1" ] || [ "$do_inst_nacl" = "1" ]; then
-  sudo dpkg --add-architecture i386
+if [ 0 -eq "${do_quick_check-0}" ] ; then
+  if [ "$do_inst_lib32" = "1" ] || [ "$do_inst_nacl" = "1" ]; then
+    sudo dpkg --add-architecture i386
+  fi
+  sudo apt-get update
 fi
-sudo apt-get update
 
 # Populate ${apt_package_list} for package_exists() parsing.
 apt_package_list=$(build_apt_package_list)
@@ -155,9 +160,7 @@ dev_list="\
   devscripts
   fakeroot
   flex
-  g++
   git-core
-  git-svn
   gperf
   libappindicator3-dev
   libasound2-dev
@@ -171,11 +174,11 @@ dev_list="\
   libcurl4-gnutls-dev
   libdrm-dev
   libelf-dev
+  libevdev-dev
   libffi-dev
   libgbm-dev
   libglib2.0-dev
   libglu1-mesa-dev
-  libgnome-keyring-dev
   libgtk-3-dev
   libkrb5-dev
   libnspr4-dev
@@ -200,14 +203,8 @@ dev_list="\
   perl
   pkg-config
   python
-  python-cherrypy3
-  python-crypto
   python-dev
-  python-numpy
-  python-opencv
-  python-openssl
-  python-psutil
-  python-yaml
+  python-setuptools
   rpm
   ruby
   subversion
@@ -223,7 +220,14 @@ dev_list="\
 # 64-bit systems need a minimum set of 32-bit compat packages for the pre-built
 # NaCl binaries.
 if file -L /sbin/init | grep -q 'ELF 64-bit'; then
-  dev_list="${dev_list} libc6-i386 lib32gcc1 lib32stdc++6"
+  dev_list="${dev_list} libc6-i386 lib32stdc++6"
+
+  # lib32gcc-s1 used to be called lib32gcc1 in older distros.
+  if package_exists lib32gcc-s1; then
+    dev_list="${dev_list} lib32gcc-s1"
+  elif package_exists lib32gcc1; then
+    dev_list="${dev_list} lib32gcc1"
+  fi
 fi
 
 # Run-time libraries required by chromeos only
@@ -239,15 +243,16 @@ common_lib_list="\
   libcairo2
   libcap2
   libcups2
+  libdrm2
+  libevdev2
   libexpat1
-  libffi6
   libfontconfig1
   libfreetype6
+  libgbm1
   libglib2.0-0
-  libgnome-keyring0
   libgtk-3-0
   libpam0g
-  libpango1.0-0
+  libpango-1.0-0
   libpci3
   libpcre3
   libpixman-1-0
@@ -274,6 +279,12 @@ common_lib_list="\
   zlib1g
 "
 
+if package_exists libffi7; then
+  common_lib_list="${common_lib_list} libffi7"
+elif package_exists libffi6; then
+  common_lib_list="${common_lib_list} libffi6"
+fi
+
 # Full list of required run-time libraries
 lib_list="\
   $common_lib_list
@@ -296,6 +307,8 @@ backwards_compatible_list="\
   fonts-stix
   fonts-thai-tlwg
   fonts-tlwg-garuda
+  g++
+  git-svn
   language-pack-da
   language-pack-fr
   language-pack-he
@@ -401,10 +414,22 @@ case $distro_codename in
                 gcc-5-multilib-arm-linux-gnueabihf
                 gcc-arm-linux-gnueabihf"
     ;;
-  disco)
+  disco|eoan)
     arm_list+=" g++-9-multilib-arm-linux-gnueabihf
                 gcc-9-multilib-arm-linux-gnueabihf
                 gcc-arm-linux-gnueabihf"
+    ;;
+  focal)
+    arm_list+=" g++-10-multilib-arm-linux-gnueabihf
+                gcc-10-multilib-arm-linux-gnueabihf
+                gcc-arm-linux-gnueabihf"
+    ;;
+  groovy)
+    arm_list+=" g++-10-multilib-arm-linux-gnueabihf
+                gcc-10-multilib-arm-linux-gnueabihf
+                gcc-arm-linux-gnueabihf
+                g++-10-arm-linux-gnueabihf
+                gcc-10-arm-linux-gnueabihf"
     ;;
 esac
 
@@ -422,7 +447,7 @@ nacl_list="\
   libncurses5:i386
   lib32ncurses5-dev
   libnss3:i386
-  libpango1.0-0:i386
+  libpango-1.0-0:i386
   libssl-dev:i386
   libtinfo-dev
   libtinfo-dev:i386
@@ -440,6 +465,7 @@ nacl_list="\
   ${naclports_list}
 "
 
+# Some package names have changed over time
 if package_exists libssl1.1; then
   nacl_list="${nacl_list} libssl1.1:i386"
 elif package_exists libssl1.0.2; then
@@ -447,8 +473,9 @@ elif package_exists libssl1.0.2; then
 else
   nacl_list="${nacl_list} libssl1.0.0:i386"
 fi
-
-# Some package names have changed over time
+if package_exists libtinfo5; then
+  nacl_list="${nacl_list} libtinfo5"
+fi
 if package_exists libpng16-16; then
   lib_list="${lib_list} libpng16-16"
 else
@@ -471,7 +498,11 @@ else
   dev_list="${dev_list} libudev0"
   nacl_list="${nacl_list} libudev0:i386"
 fi
-if package_exists libbrlapi0.6; then
+if package_exists libbrlapi0.8; then
+  dev_list="${dev_list} libbrlapi0.8"
+elif package_exists libbrlapi0.7; then
+  dev_list="${dev_list} libbrlapi0.7"
+elif package_exists libbrlapi0.6; then
   dev_list="${dev_list} libbrlapi0.6"
 else
   dev_list="${dev_list} libbrlapi0.5"
@@ -484,7 +515,11 @@ fi
 if package_exists libav-tools; then
   dev_list="${dev_list} libav-tools"
 fi
-if package_exists php7.2-cgi; then
+if package_exists php7.4-cgi; then
+  dev_list="${dev_list} php7.4-cgi libapache2-mod-php7.4"
+elif package_exists php7.3-cgi; then
+  dev_list="${dev_list} php7.3-cgi libapache2-mod-php7.3"
+elif package_exists php7.2-cgi; then
   dev_list="${dev_list} php7.2-cgi libapache2-mod-php7.2"
 elif package_exists php7.1-cgi; then
   dev_list="${dev_list} php7.1-cgi libapache2-mod-php7.1"
@@ -494,10 +529,49 @@ else
   dev_list="${dev_list} php5-cgi libapache2-mod-php5"
 fi
 
+# Most python 2 packages are removed in Ubuntu 20.10, but the build doesn't seem
+# to need them, so only install them if they're available.
+if package_exists python-crypto; then
+  dev_list="${dev_list} python-crypto"
+fi
+if package_exists python-numpy; then
+  dev_list="${dev_list} python-numpy"
+fi
+if package_exists python-openssl; then
+  dev_list="${dev_list} python-openssl"
+fi
+if package_exists python-psutil; then
+  dev_list="${dev_list} python-psutil"
+fi
+if package_exists python-yaml; then
+  dev_list="${dev_list} python-yaml"
+fi
+
 # Some packages are only needed if the distribution actually supports
 # installing them.
 if package_exists appmenu-gtk; then
   lib_list="$lib_list appmenu-gtk"
+fi
+if package_exists libgnome-keyring0; then
+  lib_list="${lib_list} libgnome-keyring0"
+fi
+if package_exists libgnome-keyring-dev; then
+  lib_list="${lib_list} libgnome-keyring-dev"
+fi
+if package_exists libvulkan-dev; then
+  dev_list="${dev_list} libvulkan-dev"
+fi
+if package_exists libvulkan1; then
+  lib_list="${lib_list} libvulkan1"
+fi
+if package_exists libinput10; then
+  lib_list="${lib_list} libinput10"
+fi
+if package_exists libinput-dev; then
+    dev_list="${dev_list} libinput-dev"
+fi
+if package_exists snapcraft; then
+    dev_list="${dev_list} snapcraft"
 fi
 
 # Cross-toolchain strip is needed for building the sysroots.
@@ -569,7 +643,7 @@ if [ "$do_inst_syms" = "1" ]; then
   if [ "$(dbg_package_name libatk1.0-0)" == "" ]; then
     dbg_list="$dbg_list $(dbg_package_name libatk1.0)"
   fi
-  if [ "$(dbg_package_name libpango1.0-0)" == "" ]; then
+  if [ "$(dbg_package_name libpango-1.0-0)" == "" ]; then
     dbg_list="$dbg_list $(dbg_package_name libpango1.0-dev)"
   fi
 else

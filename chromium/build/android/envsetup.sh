@@ -18,11 +18,17 @@ android_envsetup_main() {
   local SCRIPT_PATH="$1"
   local SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
   local CHROME_SRC="$(readlink -f "${SCRIPT_DIR}/../../")"
-  local ANDROID_SDK_ROOT="${CHROME_SRC}/third_party/android_sdk/public"
 
-  export PATH=$PATH:${ANDROID_SDK_ROOT}/platform-tools
-  export PATH=$PATH:${ANDROID_SDK_ROOT}/tools/
-  export PATH=$PATH:${CHROME_SRC}/build/android
+  # Some tools expect these environmental variables.
+  export ANDROID_SDK_ROOT="${CHROME_SRC}/third_party/android_sdk/public"
+  # ANDROID_HOME is deprecated, but generally means the same thing as
+  # ANDROID_SDK_ROOT and shouldn't hurt to set it.
+  export ANDROID_HOME="$ANDROID_SDK_ROOT"
+
+  # Set up PATH to point to SDK-provided (and other) tools, such as 'adb'.
+  export PATH=${CHROME_SRC}/build/android:$PATH
+  export PATH=${ANDROID_SDK_ROOT}/tools/:$PATH
+  export PATH=${ANDROID_SDK_ROOT}/platform-tools:$PATH
 }
 # In zsh, $0 is the name of the file being sourced.
 android_envsetup_main "${BASH_SOURCE:-$0}"
